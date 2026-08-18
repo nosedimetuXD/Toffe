@@ -84,8 +84,9 @@ export default function SalesHistory() {
     })
   }, [sales, searchQuery, selectedMethod])
 
+  // El total facturado excluye las ventas canceladas (no cuentan como ingreso)
   const totalSalesVolume = useMemo(() => {
-    return filteredSales.reduce((acc, s) => acc + s.total, 0)
+    return filteredSales.reduce((acc, s) => (s.status === 'cancelada' ? acc : acc + s.total), 0)
   }, [filteredSales])
 
   function handlePrintReceipt(sale) {
@@ -180,6 +181,7 @@ export default function SalesHistory() {
                 <th className="py-3.5 px-4">Resumen del Pedido</th>
                 <th className="py-3.5 px-4">Método de Pago & Entidad</th>
                 <th className="py-3.5 px-4">Atendido Por</th>
+                <th className="py-3.5 px-4">Estado</th>
                 <th className="py-3.5 px-4 text-right">Total</th>
                 <th className="py-3.5 px-4 text-center">Acciones</th>
               </tr>
@@ -190,9 +192,10 @@ export default function SalesHistory() {
                 const dateFormatted = sDate.toLocaleDateString('es-CO', { day: '2-digit', month: '2-digit', year: 'numeric' })
                 const timeFormatted = sDate.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', hour12: true })
                 const itemsSummary = (s.items || []).map((i) => `${i.quantity}x ${i.product_name || 'Producto'}`).join(', ') || 'Sin productos'
+                const isCancelled = s.status === 'cancelada'
 
                 return (
-                  <tr key={s.id} className="hover:bg-[#FEE4D7]/30 transition-colors">
+                  <tr key={s.id} className={`hover:bg-[#FEE4D7]/30 transition-colors ${isCancelled ? 'opacity-60' : ''}`}>
                     <td className="py-3.5 px-4">
                       <div className="flex items-center gap-2">
                         <Clock className="w-3.5 h-3.5 text-[#9F6839] shrink-0" />
@@ -221,7 +224,12 @@ export default function SalesHistory() {
                       </div>
                     </td>
                     <td className="py-3.5 px-4 font-semibold">{s.sold_by_username || 'Vendedor'}</td>
-                    <td className="py-3.5 px-4 text-right font-extrabold text-sm text-emerald-600">
+                    <td className="py-3.5 px-4">
+                      <span className={`px-2.5 py-0.5 rounded-full font-extrabold text-[10px] uppercase tracking-wider w-max ${isCancelled ? 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300' : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'}`}>
+                        {isCancelled ? 'Cancelada' : 'Completada'}
+                      </span>
+                    </td>
+                    <td className={`py-3.5 px-4 text-right font-extrabold text-sm ${isCancelled ? 'text-red-400 line-through' : 'text-emerald-600'}`}>
                       ${s.total.toLocaleString()}
                     </td>
                     <td className="py-3.5 px-4 text-center">
@@ -238,7 +246,7 @@ export default function SalesHistory() {
               })}
               {filteredSales.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="text-center py-8 text-[#9F6839] font-medium">
+                  <td colSpan={8} className="text-center py-8 text-[#9F6839] font-medium">
                     No se encontraron ventas registradas en este período.
                   </td>
                 </tr>
@@ -258,6 +266,12 @@ export default function SalesHistory() {
                 <h2 className="text-base font-black text-[#432414] uppercase tracking-wider">Toffee</h2>
                 <p className="text-[10px] text-[#9F6839] font-extrabold uppercase tracking-widest">"Hecho por y para estudiantes"</p>
               </div>
+
+              {selectedSale.status === 'cancelada' && (
+                <div className="p-2 rounded-xl bg-red-50 border border-red-200 text-red-700 font-extrabold uppercase tracking-wider text-[11px]">
+                  Venta Cancelada — No válida como ingreso
+                </div>
+              )}
 
               <div className="text-left space-y-1 text-xs">
                 <div><strong>Cliente:</strong> {selectedSale.customer_name || 'Cliente General'}</div>

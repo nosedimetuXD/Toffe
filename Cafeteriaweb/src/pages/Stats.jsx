@@ -12,7 +12,6 @@ import {
   Users,
   Calendar,
   CalendarDays,
-  Building2,
   AlertTriangle,
   Trophy,
   Clock,
@@ -181,41 +180,6 @@ export default function Stats() {
             <p className="text-xs text-[#9F6839]">Sin ventas este mes</p>
           )}
         </div>
-      </div>
-
-      {/* Tarjeta de Ranking Top 5 Bancos / Entidades Más Usados (Exactamente matching Image 1) */}
-      <div className="bg-white dark:bg-[#201009] border border-[#D4B28E] dark:border-[#9F6839]/40 rounded-3xl p-5 shadow-xs space-y-3">
-        <div className="flex items-center justify-between pb-2 border-b border-[#D4B28E]/40">
-          <h3 className="text-base font-extrabold text-[#432414] dark:text-[#FEE4D7] flex items-center gap-2">
-            <Building2 className="w-5 h-5 text-[#9F6839]" />
-            <span>Ranking Top 5 Bancos / Entidades Más Usados</span>
-          </h3>
-          <span className="text-xs font-bold text-[#9F6839]">Basado en transferencias recibidas</span>
-        </div>
-
-        {!mStats?.top_banks || mStats.top_banks.length === 0 ? (
-          <p className="text-xs text-[#9F6839] font-medium py-3 text-center">No hay transferencias ni pagos digitales registrados este mes.</p>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-            {mStats.top_banks.map((bank, idx) => (
-              <div key={bank.bank_name || idx} className="p-3 rounded-2xl bg-[#FEE4D7]/30 dark:bg-[#2A150C] border border-[#D4B28E]/50 space-y-1.5">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <span className="w-4 h-4 rounded-full bg-[#9F6839] text-white text-[9px] font-black flex items-center justify-center shrink-0">
-                    #{idx + 1}
-                  </span>
-                  <span className="text-xs font-extrabold text-[#432414] dark:text-[#FEE4D7] truncate">{bank.bank_name}</span>
-                </div>
-                <div className="flex items-center justify-between text-[11px] pt-1 border-t border-[#D4B28E]/30">
-                  <span className="text-[#9F6839] font-semibold">{bank.count} pago(s)</span>
-                  <strong className="font-extrabold text-[#432414] dark:text-[#FEE4D7]">${bank.total_amount.toLocaleString()}</strong>
-                </div>
-                <div className="w-full h-1.5 bg-[#D4B28E]/40 rounded-full overflow-hidden">
-                  <div className="h-full bg-[#9F6839] rounded-full" style={{ width: `${Math.min(100, Math.max(20, 100 - idx * 20))}%` }} />
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
       {/* Rankings Grid: Top 10 Productos Más Vendidos y Top 10 Clientes */}

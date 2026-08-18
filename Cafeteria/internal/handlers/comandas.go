@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -107,10 +106,13 @@ func (h *ComandaHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		"en_preparacion": true,
 		"listo":          true,
 		"entregado":      true,
-		"cancelado":      true,
 	}
 
 	if !validStatuses[statusStr] {
+		if statusStr == "cancelado" {
+			http.Error(w, "para cancelar use POST /comandas/{id}/cancel", http.StatusBadRequest)
+			return
+		}
 		http.Error(w, "estado de comanda inválido", http.StatusBadRequest)
 		return
 	}
@@ -144,18 +146,18 @@ func (h *ComandaHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		                              WHEN COALESCE(prepared_by_username, '') <> '' AND prepared_by_username <> 'Por asignar' THEN prepared_by_username 
 		                              ELSE 'Por asignar' 
 		                            END
-		 WHERE id = $2::uuid 
+		 WHERE id = $2::uuid AND status <> 'cancelado'
 		 RETURNING id, order_number, COALESCE(sale_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(customer_name, ''), status, COALESCE(notes, ''), created_at, updated_at, ready_at, prepared_by, COALESCE(prepared_by_username, '')`,
 		statusStr, id, preparedBy, preparedByName,
 	).Scan(&c.ID, &c.OrderNumber, &c.SaleID, &c.CustomerName, &c.Status, &c.Notes, &c.CreatedAt, &c.UpdatedAt, &c.ReadyAt, &c.PreparedBy, &c.PreparedByUsername)
 
 	if updateErr != nil {
 		if errors.Is(updateErr, pgx.ErrNoRows) {
-			http.Error(w, "comanda no encontrada", http.StatusNotFound)
+			http.Error(w, "comanda no encontrada o cancelada", http.StatusNotFound)
 			return
 		}
 		log.Printf("error crítico actualizando comanda %s: %v", id, updateErr)
-		http.Error(w, fmt.Sprintf("Error actualizando comanda: %v", updateErr), http.StatusInternalServerError)
+		http.Error(w, "error actualizando comanda", http.StatusInternalServerError)
 		return
 	}
 
@@ -164,6 +166,101 @@ func (h *ComandaHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		"order_number": c.OrderNumber,
 		"status":       c.Status,
 		"updated_at":   c.UpdatedAt,
+	})
+
+	writeJSON(w, http.StatusOK, c)
+}
+
+// POST /comandas/{id}/cancel
+// Cancela la venta asociada a una comanda dentro de los 5 minutos posteriores a su creación.
+// La venta no se elimina: queda marcada como 'cancelada' y deja de contar como ingreso.
+func (h *ComandaHandler) Cancel(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseIDParam(w, r)
+	if !ok {
+		return
+	}
+
+	tx, err := h.DB.Begin(r.Context())
+	if err != nil {
+		serverError(w, "error cancelando venta", err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	var saleID uuid.UUID
+	var comandaStatus string
+	err = tx.QueryRow(r.Context(),
+		`SELECT sale_id, status FROM comandas WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&saleID, &comandaStatus)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "comanda no encontrada", http.StatusNotFound)
+			return
+		}
+		serverError(w, "error cancelando venta", err)
+		return
+	}
+
+	if comandaStatus == "cancelado" {
+		http.Error(w, "la venta ya fue cancelada", http.StatusConflict)
+		return
+	}
+
+	var saleStatus string
+	var saleCreatedAt time.Time
+	err = tx.QueryRow(r.Context(),
+		`SELECT COALESCE(status, 'completada'), created_at FROM sales WHERE id = $1 FOR UPDATE`, saleID,
+	).Scan(&saleStatus, &saleCreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "venta asociada no encontrada", http.StatusNotFound)
+			return
+		}
+		serverError(w, "error cancelando venta", err)
+		return
+	}
+
+	if saleStatus == "cancelada" {
+		http.Error(w, "la venta ya fue cancelada", http.StatusConflict)
+		return
+	}
+
+	if time.Since(saleCreatedAt) > 5*time.Minute {
+		http.Error(w, "la venta solo puede cancelarse durante los 5 minutos posteriores a su creación", http.StatusForbidden)
+		return
+	}
+
+	if _, err := tx.Exec(r.Context(),
+		`UPDATE sales SET status = 'cancelada' WHERE id = $1`, saleID); err != nil {
+		serverError(w, "error cancelando venta", err)
+		return
+	}
+
+	var c models.Comanda
+	err = tx.QueryRow(r.Context(),
+		`UPDATE comandas SET status = 'cancelado', updated_at = now() WHERE id = $1
+		 RETURNING id, order_number, COALESCE(sale_id, '00000000-0000-0000-0000-000000000000'::uuid), COALESCE(customer_name, ''), status, COALESCE(notes, ''), created_at, updated_at, ready_at, prepared_by, COALESCE(prepared_by_username, '')`,
+		id,
+	).Scan(&c.ID, &c.OrderNumber, &c.SaleID, &c.CustomerName, &c.Status, &c.Notes, &c.CreatedAt, &c.UpdatedAt, &c.ReadyAt, &c.PreparedBy, &c.PreparedByUsername)
+	if err != nil {
+		serverError(w, "error cancelando venta", err)
+		return
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		serverError(w, "error cancelando venta", err)
+		return
+	}
+
+	h.Hub.Publish("comanda_updated", map[string]interface{}{
+		"id":           c.ID,
+		"order_number": c.OrderNumber,
+		"status":       c.Status,
+		"updated_at":   c.UpdatedAt,
+	})
+	h.Hub.Publish("sale_cancelled", map[string]interface{}{
+		"sale_id":    saleID,
+		"comanda_id": c.ID,
 	})
 
 	writeJSON(w, http.StatusOK, c)

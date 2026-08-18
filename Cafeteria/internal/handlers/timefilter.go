@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 )
 
 const bogotaTZ = "America/Bogota"
@@ -20,37 +19,32 @@ type timeFilter struct {
 	month     int
 }
 
-// parseTimeFilter lee los parámetros de rango temporal de la petición. Las fechas
-// que no cumplan el formato AAAA-MM-DD y los años/meses fuera de rango se descartan.
-func parseTimeFilter(r *http.Request) timeFilter {
-	f := timeFilter{period: r.URL.Query().Get("period")}
+// parseTimeFilter lee los parámetros de rango temporal de la petición. Si se envía un
+// rango start/end con formato inválido responde 400 y devuelve false; los años/meses
+// fuera de rango se descartan y caen en el filtro por período.
+func parseTimeFilter(w http.ResponseWriter, r *http.Request) (timeFilter, bool) {
+	query := r.URL.Query()
+	f := timeFilter{period: query.Get("period")}
 
-	start := parseDateParam(r.URL.Query().Get("start_date"))
-	end := parseDateParam(r.URL.Query().Get("end_date"))
-	if start != "" && end != "" {
+	startRaw := strings.TrimSpace(query.Get("start_date"))
+	endRaw := strings.TrimSpace(query.Get("end_date"))
+	if startRaw != "" && endRaw != "" {
+		start, end, ok := normalizeDateRange(startRaw, endRaw)
+		if !ok {
+			http.Error(w, "start_date y end_date deben tener formato YYYY-MM-DD", http.StatusBadRequest)
+			return f, false
+		}
 		f.startDate, f.endDate = start, end
-		return f
+		return f, true
 	}
 
-	year, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("year")))
-	month, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("month_num")))
+	year, _ := strconv.Atoi(strings.TrimSpace(query.Get("year")))
+	month, _ := strconv.Atoi(strings.TrimSpace(query.Get("month_num")))
 	if year > 2000 && month >= 1 && month <= 12 {
 		f.year, f.month = year, month
 	}
 
-	return f
-}
-
-// parseDateParam valida una fecha AAAA-MM-DD y devuelve "" si no lo es.
-func parseDateParam(raw string) string {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return ""
-	}
-	if _, err := time.Parse(time.DateOnly, value); err != nil {
-		return ""
-	}
-	return value
+	return f, true
 }
 
 // Condition devuelve la expresión booleana SQL del rango, donde prefix es el alias
@@ -79,6 +73,24 @@ func (f timeFilter) Condition(prefix string) string {
 		return fmt.Sprintf("%s >= date_trunc('year', now())", col)
 	default: // "all"
 		return "1=1"
+	}
+}
+
+// recentPeriodWhere devuelve la cláusula WHERE de los listados simples
+// (?period=today|week|month), donde prefix es el alias de la tabla. Devuelve ""
+// para cualquier otro valor, es decir, todo el histórico.
+func recentPeriodWhere(prefix, period string) string {
+	col := prefix + "created_at"
+
+	switch period {
+	case "today":
+		return fmt.Sprintf("WHERE %s >= ((now() AT TIME ZONE '%s')::date AT TIME ZONE '%s')", col, bogotaTZ, bogotaTZ)
+	case "week":
+		return fmt.Sprintf("WHERE %s >= (now() - INTERVAL '7 days')", col)
+	case "month":
+		return fmt.Sprintf("WHERE %s >= (now() - INTERVAL '30 days')", col)
+	default:
+		return ""
 	}
 }
 

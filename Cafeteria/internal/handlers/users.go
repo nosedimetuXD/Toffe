@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -319,7 +318,7 @@ func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	tag, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
 	if err != nil {
 		log.Printf("error eliminando usuario: %v", err)
-		http.Error(w, fmt.Sprintf("no se pudo eliminar el usuario: %v", err), http.StatusBadRequest)
+		http.Error(w, "no se pudo eliminar el usuario", http.StatusBadRequest)
 		return
 	}
 	if tag.RowsAffected() == 0 {
