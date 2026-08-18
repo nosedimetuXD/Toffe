@@ -23,15 +23,17 @@
 - **Descuento Automático**: Al registrar una merma (ej. vasos quebrados, leche vencida, derrames), la cantidad reportada se descuenta automáticamente del stock de inventario.
 - **Historial Completo**: Registro auditable con fecha/hora, insumo afectado, cantidad perdida, unidad, motivo detallado y nombre del usuario declarante.
 
-### 💰 3. Contabilidad Financial & Ranking Top 5 Bancos
-- Reporte unificado de ingresos por ventas, egresos operativos y balance neto por periodos (`Hoy`, `Esta Semana`, `Este Mes`, `Histórico Total`).
-- **Ranking Top 5 Bancos / Entidades Más Usados**: Panel visual interactivo que muestra las 5 entidades digitales más utilizadas por los clientes, con número de transacciones, volumen total en dinero ($) y barra de frecuencia relativa.
+### 💰 3. Contabilidad Financiera & Registro Manual de Ingresos
+- Reporte unificado de ingresos por ventas, ingresos manuales, egresos operativos y balance neto por periodos (`Hoy`, `Esta Semana`, `Este Mes`, `Histórico Total`).
+- **Registro Manual de Ingresos**: Permite registrar ingresos extra no provenientes del POS (ventas externas, aportes de capital, devoluciones, otros) con descripción, monto, categoría y forma de pago. Se suman al total de ingresos y aparecen en el flujo de caja combinado.
 - Registro de gastos por categorías (Insumos, Servicios, Mantenimiento, Nómina, Otros) con reabastecimiento directo de inventario.
+- Las **ventas canceladas** se excluyen automáticamente de todos los cálculos de ingresos, métodos de pago y balance.
 
 ### 🛎️ 4. Comandas Diarias en Tiempo Real (Barra & Cocina)
 - Generación automática de tickets de comanda al confirmar cada venta en el POS.
 - **Filtro Diario Automático**: El tablero limpia la vista al inicio de cada jornada mostrando solo pedidos del día.
-- Estados de comanda: `Pendientes` ➔ `En Preparación` ➔ `Entregados`.
+- Estados de comanda: `Pendientes` ➔ `En Preparación` ➔ `Listos` ➔ `Entregados` (o `Cancelados`).
+- **Cancelación de Ventas (ventana de 5 minutos)**: Desde el tablero de comandas se puede cancelar una venta durante los 5 minutos posteriores a su creación. La venta **no se elimina**: queda marcada como `Cancelada` en el historial de ventas y deja de contar como ingreso en contabilidad y estadísticas.
 - Sincronización instantánea vía Server-Sent Events (SSE).
 
 ### 🏆 5. Panel de Estadísticas Ejecutivas del Mes (Exclusivo Dueño)
@@ -39,13 +41,18 @@
 - **Métricas Clave**: Ventas Totales del Mes, Gastos Totales del Mes y Ganancia Neta.
 - 🥇 **Mejor Vendedor del Mes**: Usuario que generó el mayor volumen de ventas.
 - 🔥 **Producto Más Vendido del Mes**: Producto estrella con mayor número de unidades e ingresos.
-- 🏆 **Top 5 Clientes**: Ranking de clientes frecuentes por volumen de compra.
+- 🏆 **Top 10 Clientes**: Ranking de clientes frecuentes por volumen de compra.
+- Todas las métricas excluyen las ventas canceladas.
 
-### 👤 6. Perfil de Usuario & Gestión de Personal
+### 🧾 6. Historial de Ventas con Estado
+- Registro cronológico auditable de todas las ventas con recibo imprimible.
+- **Columna de Estado**: Cada venta muestra su estado `Completada` o `Cancelada`. Las ventas canceladas se conservan en el historial (nunca se eliminan) pero no suman al total facturado.
+
+### 👤 7. Perfil de Usuario & Gestión de Personal
 - **Mi Perfil**: Cada usuario puede personalizar su nombre de usuario, contraseña y foto de perfil (avatar desde archivo local o enlace Google Drive).
 - **Gestión de Personal (Dueño)**: Creación, edición de rol y eliminación de usuarios mediante transacciones atómicas que preservan intacto todo el historial contable y operativo.
 
-### 🎨 7. Diseño Minimalista & Navegación Categorizada
+### 🎨 8. Diseño Minimalista & Navegación Categorizada
 - Iconografía limpia y minimalista basada en vectores **Lucide React** (sin emojis cliché).
 - **Barra Lateral Categorizada**: Organizada en 4 módulos (*Operación & Ventas*, *Catálogo & Inventario*, *Finanzas & Control*, *Sistema & Cuenta*) con opción de colapsado compacto.
 
@@ -105,6 +112,12 @@
    npm run dev
    ```
    *El frontend abrirá en `http://localhost:5173`.*
+
+---
+
+## 📚 Documentación Detallada
+
+Consulta [DOCUMENTATION.md](DOCUMENTATION.md) para la especificación completa de la aplicación: arquitectura, módulos, flujos de negocio, endpoints de la API, reglas de estados y esquema de base de datos.
 
 ---
 
