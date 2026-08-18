@@ -86,7 +86,12 @@
 2. Configura las variables en `Cafeteria/.env`:
    ```env
    DB_URL=postgres://postgres:TU_PASSWORD@localhost:5432/Cafeteria?sslmode=disable
+   # Mínimo 32 caracteres aleatorios; el servidor no arranca si falta o es corto.
+   # Genérala con: openssl rand -base64 48
    JWT_SECRET=tu_clave_secreta_super_segura
+   # Orígenes permitidos por CORS, separados por comas.
+   # Por defecto: http://localhost:5173,http://127.0.0.1:5173
+   ALLOWED_ORIGINS=http://localhost:5173
    ```
 
 3. Compila y ejecuta el servidor backend:

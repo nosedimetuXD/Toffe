@@ -39,9 +39,14 @@ func (h *AccountingHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 	var timeCondComandas string
 
 	if startDate != "" && endDate != "" {
-		timeCondition = fmt.Sprintf("created_at >= '%s 00:00:00' AND created_at <= '%s 23:59:59'", startDate, endDate)
-		timeCondSales = fmt.Sprintf("s.created_at >= '%s 00:00:00' AND s.created_at <= '%s 23:59:59'", startDate, endDate)
-		timeCondComandas = fmt.Sprintf("c.created_at >= '%s 00:00:00' AND c.created_at <= '%s 23:59:59'", startDate, endDate)
+		start, end, ok := normalizeDateRange(startDate, endDate)
+		if !ok {
+			http.Error(w, "start_date y end_date deben tener formato YYYY-MM-DD", http.StatusBadRequest)
+			return
+		}
+		timeCondition = fmt.Sprintf("created_at >= '%s 00:00:00' AND created_at <= '%s 23:59:59'", start, end)
+		timeCondSales = fmt.Sprintf("s.created_at >= '%s 00:00:00' AND s.created_at <= '%s 23:59:59'", start, end)
+		timeCondComandas = fmt.Sprintf("c.created_at >= '%s 00:00:00' AND c.created_at <= '%s 23:59:59'", start, end)
 	} else if yearParam != "" && monthParam != "" {
 		y, _ := strconv.Atoi(yearParam)
 		m, _ := strconv.Atoi(monthParam)

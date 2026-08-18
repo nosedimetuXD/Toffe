@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -172,7 +171,7 @@ func (h *ComandaHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("error crítico actualizando comanda %s: %v", id, updateErr)
-		http.Error(w, fmt.Sprintf("Error actualizando comanda: %v", updateErr), http.StatusInternalServerError)
+		http.Error(w, "error actualizando comanda", http.StatusInternalServerError)
 		return
 	}
 
