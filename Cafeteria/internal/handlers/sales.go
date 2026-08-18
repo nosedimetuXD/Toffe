@@ -29,6 +29,7 @@ func NewSaleHandler(db *pgxpool.Pool, hub *events.Hub) *SaleHandler {
 	defer cancel()
 
 	execSchema(ctx, db, "sales.bank_details", `ALTER TABLE sales ADD COLUMN IF NOT EXISTS bank_details TEXT DEFAULT ''`)
+	execSchema(ctx, db, "sales.status", `ALTER TABLE sales ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'completada'`)
 	execSchema(ctx, db, "sales.sold_by_name", `ALTER TABLE sales ADD COLUMN IF NOT EXISTS sold_by_name TEXT DEFAULT ''`)
 	execSchema(ctx, db, "sales.sold_by nullable", `ALTER TABLE sales ALTER COLUMN sold_by DROP NOT NULL`)
 
@@ -59,9 +60,9 @@ func (h *SaleHandler) List(w http.ResponseWriter, r *http.Request) {
 	var rawCond string
 
 	if startDate != "" && endDate != "" {
-		start, end, err := parseDateRange(startDate, endDate)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		start, end, ok := normalizeDateRange(startDate, endDate)
+		if !ok {
+			http.Error(w, "start_date y end_date deben tener formato YYYY-MM-DD", http.StatusBadRequest)
 			return
 		}
 		rawCond = fmt.Sprintf("s.created_at >= '%s 00:00:00' AND s.created_at <= '%s 23:59:59'", start, end)
@@ -98,7 +99,7 @@ func (h *SaleHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	query := fmt.Sprintf(`SELECT s.id, s.sold_by, COALESCE(NULLIF(s.sold_by_name, ''), u.username, 'Personal'), COALESCE(s.customer_name, 'Cliente General'), 
 		        COALESCE(s.payment_method, 'efectivo'), COALESCE(s.cash_amount, 0), COALESCE(s.transfer_amount, 0), 
-		        COALESCE(s.bank_details, ''), s.total, s.created_at,
+		        COALESCE(s.bank_details, ''), COALESCE(s.status, 'completada'), s.total, s.created_at,
 		        COALESCE(
 		          (SELECT json_agg(json_build_object(
 		             'product_id', si.product_id,
@@ -126,7 +127,7 @@ func (h *SaleHandler) List(w http.ResponseWriter, r *http.Request) {
 		var s models.Sale
 		var itemsJSON []byte
 		if err := rows.Scan(&s.ID, &s.SoldBy, &s.SoldByUsername, &s.CustomerName,
-			&s.PaymentMethod, &s.CashAmount, &s.TransferAmount, &s.BankDetails, &s.Total, &s.CreatedAt, &itemsJSON); err != nil {
+			&s.PaymentMethod, &s.CashAmount, &s.TransferAmount, &s.BankDetails, &s.Status, &s.Total, &s.CreatedAt, &itemsJSON); err != nil {
 			log.Printf("error leyendo ventas: %v", err)
 			http.Error(w, "error leyendo ventas", http.StatusInternalServerError)
 			return
@@ -161,12 +162,12 @@ func (h *SaleHandler) Get(w http.ResponseWriter, r *http.Request) {
 	err = h.DB.QueryRow(r.Context(),
 		`SELECT s.id, s.sold_by, COALESCE(u.username, ''), COALESCE(s.customer_name, 'Cliente General'), 
 		        COALESCE(s.payment_method, 'efectivo'), COALESCE(s.cash_amount, 0), COALESCE(s.transfer_amount, 0), 
-		        COALESCE(s.bank_details, ''), s.total, s.created_at 
+		        COALESCE(s.bank_details, ''), COALESCE(s.status, 'completada'), s.total, s.created_at 
 		 FROM sales s
 		 LEFT JOIN users u ON s.sold_by = u.id
 		 WHERE s.id = $1`, id,
 	).Scan(&s.ID, &s.SoldBy, &s.SoldByUsername, &s.CustomerName,
-		&s.PaymentMethod, &s.CashAmount, &s.TransferAmount, &s.BankDetails, &s.Total, &s.CreatedAt)
+		&s.PaymentMethod, &s.CashAmount, &s.TransferAmount, &s.BankDetails, &s.Status, &s.Total, &s.CreatedAt)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "venta no encontrada", http.StatusNotFound)

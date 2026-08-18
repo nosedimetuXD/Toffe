@@ -5,6 +5,9 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
+	"strings"
+	"time"
 
 	"github.com/go-chi/cors"
 
@@ -12,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/joho/godotenv"
 
+	"github.com/NosedimetuXD/cafeteria/internal/auth"
 	"github.com/NosedimetuXD/cafeteria/internal/db"
 	"github.com/NosedimetuXD/cafeteria/internal/events"
 	"github.com/NosedimetuXD/cafeteria/internal/handlers"
@@ -23,6 +27,10 @@ func main() {
 
 	if err := godotenv.Load(); err != nil {
 		log.Println("no se encontró .env, usando variables de entorno del sistema")
+	}
+
+	if err := auth.CheckSecret(); err != nil {
+		log.Fatalf("configuración de JWT inválida (%v): define JWT_SECRET con al menos %d caracteres aleatorios", err, auth.MinSecretLength)
 	}
 
 	ctx := context.Background()
@@ -39,7 +47,7 @@ func main() {
 	r.Use(middleware.Logger)
 
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
+		AllowedOrigins:   allowedOrigins(),
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Content-Type", "Authorization"},
 		AllowCredentials: false,
@@ -53,7 +61,10 @@ func main() {
 	})
 
 	authHandler := handlers.NewAuthHandler(pool)
-	r.Post("/login", authHandler.Login)
+	r.Group(func(r chi.Router) {
+		r.Use(custommw.RateLimit(10, time.Minute))
+		r.Post("/login", authHandler.Login)
+	})
 
 	productHandler := handlers.NewProductHandler(pool)
 	ingredientHandler := handlers.NewIngredientHandler(pool, hub)
@@ -119,6 +130,7 @@ func main() {
 		r.Use(custommw.RequireAuth)
 		r.Get("/comandas", comandaHandler.List)
 		r.Patch("/comandas/{id}/status", comandaHandler.UpdateStatus)
+		r.Post("/comandas/{id}/cancel", comandaHandler.Cancel)
 	})
 
 	// Ver tareas y cambiar su propio estado: cualquier usuario logueado
@@ -153,10 +165,29 @@ func main() {
 		r.Get("/accounting/summary", accountingHandler.GetSummary)
 		r.Get("/expenses", accountingHandler.ListExpenses)
 		r.Post("/expenses", accountingHandler.CreateExpense)
+		r.Get("/incomes", accountingHandler.ListIncomes)
+		r.Post("/incomes", accountingHandler.CreateIncome)
 	})
 
 	log.Println("servidor corriendo en :8080")
 	if err := http.ListenAndServe(":8080", r); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("el servidor se detuvo: %v", err)
 	}
+}
+
+// allowedOrigins lee ALLOWED_ORIGINS (lista separada por comas) y cae en los
+// orígenes de desarrollo local si no está configurada.
+func allowedOrigins() []string {
+	raw := strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS"))
+	if raw == "" {
+		return []string{"http://localhost:5173", "http://127.0.0.1:5173"}
+	}
+
+	var origins []string
+	for _, origin := range strings.Split(raw, ",") {
+		if origin = strings.TrimSpace(origin); origin != "" {
+			origins = append(origins, origin)
+		}
+	}
+	return origins
 }

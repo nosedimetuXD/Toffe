@@ -39,10 +39,15 @@ type TopProductStat struct {
 	TotalAmount float64 `json:"total_amount"`
 }
 
-type TopBankStat struct {
-	BankName    string  `json:"bank_name"`
-	Count       int     `json:"count"`
-	TotalAmount float64 `json:"total_amount"`
+type Income struct {
+	ID             uuid.UUID `json:"id"`
+	Description    string    `json:"description"`
+	Amount         float64   `json:"amount"`
+	Category       string    `json:"category"`
+	PaymentMethod  string    `json:"payment_method"`
+	RegisteredBy   uuid.UUID `json:"registered_by"`
+	RegistererName string    `json:"registerer_name,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type MonthlyStats struct {
@@ -54,11 +59,12 @@ type MonthlyStats struct {
 	TopProduct         *TopProductStat  `json:"top_product"`
 	TopProducts        []TopProductStat `json:"top_products"`
 	TopCustomers       []CustomerStat   `json:"top_customers"`
-	TopBanks           []TopBankStat    `json:"top_banks"`
 }
 
 type AccountingSummary struct {
 	TotalIncome           float64            `json:"total_income"`
+	ManualIncome          float64            `json:"manual_income"`
+	ManualIncomeCount     int                `json:"manual_income_count"`
 	TotalExpenses         float64            `json:"total_expenses"`
 	NetBalance            float64            `json:"net_balance"`
 	IncomeByPaymentMethod map[string]float64 `json:"income_by_payment_method"`

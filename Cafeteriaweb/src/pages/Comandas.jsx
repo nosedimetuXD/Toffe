@@ -8,14 +8,18 @@ import {
   Bell,
   Play,
   Check,
-  User
+  User,
+  XCircle
 } from 'lucide-react'
+
+const CANCEL_WINDOW_MS = 5 * 60 * 1000
 
 export default function Comandas() {
   const { user } = useAuth()
   const [comandas, setComandas] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [now, setNow] = useState(Date.now())
 
   async function loadComandas() {
     try {
@@ -81,6 +85,27 @@ export default function Comandas() {
     }
   }, [])
 
+  // Refrescar el reloj para ocultar el botón de cancelar al vencer la ventana de 5 minutos
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 15000)
+    return () => clearInterval(interval)
+  }, [])
+
+  async function handleCancelSale(c) {
+    const confirmed = window.confirm(
+      `¿Cancelar la venta de la comanda #${c.order_number || c.id.slice(0, 4)}? La venta quedará marcada como cancelada y no contará como ingreso.`
+    )
+    if (!confirmed) return
+
+    try {
+      await api.post(`/comandas/${c.id}/cancel`, {})
+      await loadComandas()
+    } catch (err) {
+      console.error('Error al cancelar la venta:', err)
+      alert(err.message || 'No se pudo cancelar la venta')
+    }
+  }
+
   async function handleStatusChange(id, newStatus) {
     try {
       const preparerName = user?.username || ''
@@ -132,11 +157,19 @@ export default function Comandas() {
   const pending = comandas.filter((c) => c.status === 'pendiente')
   const inPrep = comandas.filter((c) => c.status === 'en_preparacion')
   const ready = comandas.filter((c) => c.status === 'listo')
-  const delivered = comandas.filter((c) => c.status === 'entregado').slice(0, 15)
+  const delivered = comandas
+    .filter((c) => c.status === 'entregado' || c.status === 'cancelado')
+    .slice(0, 15)
+
+  const canCancel = (c) => {
+    if (!c.created_at || c.status === 'cancelado') return false
+    return now - new Date(c.created_at).getTime() < CANCEL_WINDOW_MS
+  }
 
   if (loading) return <p className="p-4 text-sm font-semibold text-[#9F6839]">Cargando comandas en vivo...</p>
 
   const renderCard = (c, colType) => {
+    const isCancelled = c.status === 'cancelado'
     const isFinished = c.status === 'listo' || c.status === 'entregado'
     const prepDuration = isFinished
       ? formatDuration(c.created_at, c.ready_at || c.updated_at)
@@ -238,9 +271,25 @@ export default function Comandas() {
           )}
 
           {colType === 'delivered' && (
-            <span className="text-xs text-emerald-600 font-bold flex items-center justify-center gap-1">
-              <CheckCircle2 className="w-3.5 h-3.5" /> Entregada
-            </span>
+            isCancelled ? (
+              <span className="text-xs text-red-600 font-bold flex items-center justify-center gap-1">
+                <XCircle className="w-3.5 h-3.5" /> Venta Cancelada
+              </span>
+            ) : (
+              <span className="text-xs text-emerald-600 font-bold flex items-center justify-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5" /> Entregada
+              </span>
+            )
+          )}
+
+          {canCancel(c) && (
+            <button
+              onClick={() => handleCancelSale(c)}
+              className="w-full mt-2 flex items-center justify-center gap-1.5 py-2 px-3 rounded-2xl bg-white dark:bg-[#201009] hover:bg-red-50 dark:hover:bg-red-950/40 border border-red-300 text-red-600 text-xs font-bold transition-all cursor-pointer"
+            >
+              <XCircle className="w-3.5 h-3.5" />
+              <span>Cancelar Venta (5 min)</span>
+            </button>
           )}
         </div>
       </div>
@@ -331,7 +380,7 @@ export default function Comandas() {
           <div className="flex items-center justify-between pb-3 mb-3 border-b border-[#D4B28E]/60">
             <span className="text-xs font-extrabold text-[#432414] dark:text-[#FEE4D7] uppercase tracking-wider flex items-center gap-1.5">
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Entregadas ({delivered.length})</span>
+              <span>Entregadas / Canceladas ({delivered.length})</span>
             </span>
           </div>
           <div className="space-y-3">

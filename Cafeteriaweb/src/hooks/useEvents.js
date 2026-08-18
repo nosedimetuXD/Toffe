@@ -6,7 +6,7 @@ export function useEvents(eventTypes, onEvent) {
         const token = localStorage.getItem('token')
         if (!token) return
 
-        const evtSource = new EventSource(`${API_URL}/events?token=${token}`)
+        const evtSource = new EventSource(`${API_URL}/events?token=${encodeURIComponent(token)}`)
 
         const listeners = eventTypes.map((type) => {
             const handler = (e) => {

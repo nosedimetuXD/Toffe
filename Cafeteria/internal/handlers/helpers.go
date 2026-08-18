@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -55,23 +54,6 @@ func userIDFromContext(ctx context.Context) (uuid.UUID, error) {
 	default:
 		return uuid.Nil, ErrNoUserInContext
 	}
-}
-
-// parseDateRange valida un rango start_date/end_date en formato YYYY-MM-DD y lo
-// devuelve normalizado, de modo que nunca llegue texto arbitrario a la consulta.
-func parseDateRange(startDate, endDate string) (string, string, error) {
-	start, err := time.Parse("2006-01-02", startDate)
-	if err != nil {
-		return "", "", fmt.Errorf("start_date debe tener formato YYYY-MM-DD: %w", err)
-	}
-	end, err := time.Parse("2006-01-02", endDate)
-	if err != nil {
-		return "", "", fmt.Errorf("end_date debe tener formato YYYY-MM-DD: %w", err)
-	}
-	if end.Before(start) {
-		return "", "", errors.New("end_date no puede ser anterior a start_date")
-	}
-	return start.Format("2006-01-02"), end.Format("2006-01-02"), nil
 }
 
 // parseYearMonth valida los parámetros year/month_num.

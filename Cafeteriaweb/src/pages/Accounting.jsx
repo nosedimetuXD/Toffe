@@ -24,11 +24,13 @@ import {
   ShieldAlert,
   ArrowRightLeft,
   Award,
-  Users
+  Users,
+  Trash2
 } from 'lucide-react'
 
 export default function Accounting() {
   const [expenses, setExpenses] = useState([])
+  const [incomes, setIncomes] = useState([])
   const [sales, setSales] = useState([])
   const [ingredients, setIngredients] = useState([])
   const [wasteReports, setWasteReports] = useState([])
@@ -51,6 +53,15 @@ export default function Accounting() {
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState('')
 
+  // Modal Registrar Ingreso Manual
+  const [isIncomeModalOpen, setIsIncomeModalOpen] = useState(false)
+  const [incomeDescription, setIncomeDescription] = useState('')
+  const [incomeAmount, setIncomeAmount] = useState('')
+  const [incomeCategory, setIncomeCategory] = useState('otros')
+  const [incomePaymentMethod, setIncomePaymentMethod] = useState('efectivo')
+  const [incomeSubmitting, setIncomeSubmitting] = useState(false)
+  const [incomeFormError, setIncomeFormError] = useState('')
+
   function addExpenseBankLine() {
     setExpenseBankLines((prev) => [...prev, { bank: 'Bre-B/Llave', amount: '' }])
   }
@@ -70,11 +81,13 @@ export default function Accounting() {
     try {
       const { data, failed } = await loadAllSettled({
         gastos: api.get('/expenses?period=all'),
+        ingresos: api.get('/incomes'),
         insumos: api.get('/ingredients'),
         ventas: api.get('/sales?period=all'),
         desperdicios: api.get('/waste')
       })
       setExpenses(Array.isArray(data.gastos) ? data.gastos : [])
+      setIncomes(Array.isArray(data.ingresos) ? data.ingresos : [])
       setIngredients(Array.isArray(data.insumos) ? data.insumos : [])
       setSales(Array.isArray(data.ventas) ? data.ventas : [])
       setWasteReports(Array.isArray(data.desperdicios) ? data.desperdicios : [])
@@ -105,6 +118,37 @@ export default function Accounting() {
     setAddedUnit('ml')
     setFormError('')
     setIsModalOpen(true)
+  }
+
+  function openIncomeModal() {
+    setIncomeDescription('')
+    setIncomeAmount('')
+    setIncomeCategory('otros')
+    setIncomePaymentMethod('efectivo')
+    setIncomeFormError('')
+    setIsIncomeModalOpen(true)
+  }
+
+  async function handleCreateIncome(e) {
+    e.preventDefault()
+    setIncomeSubmitting(true)
+    setIncomeFormError('')
+
+    try {
+      await api.post('/incomes', {
+        description: incomeDescription,
+        amount: Number(incomeAmount) || 0,
+        category: incomeCategory,
+        payment_method: incomePaymentMethod
+      })
+
+      setIsIncomeModalOpen(false)
+      await loadData()
+    } catch (err) {
+      setIncomeFormError(err.message || 'No se pudo registrar el ingreso')
+    } finally {
+      setIncomeSubmitting(false)
+    }
   }
 
   const selectedAddedIng = ingredients.find((i) => i.id === ingredientId)
@@ -166,6 +210,7 @@ export default function Accounting() {
 
   const safeSales = Array.isArray(sales) ? sales : []
   const safeExpenses = Array.isArray(expenses) ? expenses : []
+  const safeIncomes = Array.isArray(incomes) ? incomes : []
 
   // Filtro de ventas por zona horaria local de navegador
   const filteredSales = useMemo(() => {
@@ -215,6 +260,30 @@ export default function Accounting() {
     })
   }, [safeExpenses, period])
 
+  // Filtro de ingresos manuales por zona horaria local de navegador
+  const filteredIncomes = useMemo(() => {
+    return safeIncomes.filter((inc) => {
+      if (!inc || !inc.created_at) return true
+      const incDate = new Date(inc.created_at)
+      if (isNaN(incDate.getTime())) return true
+      const now = new Date()
+
+      if (period === 'today') {
+        return incDate.toDateString() === now.toDateString()
+      }
+      if (period === 'week') {
+        const startOfWeek = new Date()
+        startOfWeek.setDate(now.getDate() - 7)
+        startOfWeek.setHours(0, 0, 0, 0)
+        return incDate >= startOfWeek
+      }
+      if (period === 'month') {
+        return incDate.getMonth() === now.getMonth() && incDate.getFullYear() === now.getFullYear()
+      }
+      return true
+    })
+  }, [safeIncomes, period])
+
   // Filtro de mermas por periodo
   const filteredWaste = useMemo(() => {
     return (Array.isArray(wasteReports) ? wasteReports : []).filter((w) => {
@@ -246,17 +315,32 @@ export default function Accounting() {
     }, 0)
   }, [filteredWaste])
 
-  // Resumen dinámico sincronizado
+  // Resumen dinámico sincronizado (las ventas canceladas no cuentan como ingreso)
   const summary = useMemo(() => {
     let totalIncome = 0
     let cashIncome = 0
     let transferIncome = 0
+    let completedSalesCount = 0
 
     filteredSales.forEach((s) => {
+      if (s.status === 'cancelada') return
       const tot = Number(s.total) || 0
       totalIncome += tot
       cashIncome += Number(s.cash_amount) || 0
       transferIncome += Number(s.transfer_amount) || 0
+      completedSalesCount += 1
+    })
+
+    let manualIncome = 0
+    filteredIncomes.forEach((inc) => {
+      const amt = Number(inc.amount) || 0
+      manualIncome += amt
+      totalIncome += amt
+      if (inc.payment_method === 'transferencia') {
+        transferIncome += amt
+      } else {
+        cashIncome += amt
+      }
     })
 
     let totalExpenses = 0
@@ -266,7 +350,9 @@ export default function Accounting() {
 
     return {
       total_income: totalIncome,
-      sales_count: filteredSales.length,
+      manual_income: manualIncome,
+      manual_income_count: filteredIncomes.length,
+      sales_count: completedSalesCount,
       total_expenses: totalExpenses,
       expenses_count: filteredExpenses.length,
       net_balance: totalIncome - totalExpenses - totalWasteLoss,
@@ -275,18 +361,27 @@ export default function Accounting() {
         transferencia: transferIncome
       }
     }
-  }, [filteredSales, filteredExpenses, totalWasteLoss])
+  }, [filteredSales, filteredIncomes, filteredExpenses, totalWasteLoss])
 
   const combinedMovements = useMemo(() => {
     return [
       ...filteredSales.map((s) => ({
         id: s.id || Math.random().toString(),
-        type: 'income',
+        type: s.status === 'cancelada' ? 'cancelled' : 'income',
         date: s.created_at || new Date().toISOString(),
         concept: `Venta - ${s.customer_name || 'Cliente General'}`,
-        details: `${s.sold_by_username ? `Vendido por ${s.sold_by_username}` : 'Venta POS'}${s.bank_details ? ` (${s.bank_details})` : ''}`,
+        details: `${s.sold_by_username ? `Vendido por ${s.sold_by_username}` : 'Venta POS'}${s.bank_details ? ` (${s.bank_details})` : ''}${s.status === 'cancelada' ? ' | Venta cancelada, no cuenta como ingreso' : ''}`,
         paymentMethod: s.payment_method || 'efectivo',
         amount: Number(s.total) || 0
+      })),
+      ...filteredIncomes.map((inc) => ({
+        id: inc.id || Math.random().toString(),
+        type: 'income',
+        date: inc.created_at || new Date().toISOString(),
+        concept: `Ingreso Manual - ${inc.description || 'Ingreso'}`,
+        details: inc.registerer_name ? `Registrado por ${inc.registerer_name}` : 'Ingreso registrado en contabilidad',
+        paymentMethod: inc.payment_method || 'efectivo',
+        amount: Number(inc.amount) || 0
       })),
       ...filteredExpenses.map((e) => ({
         id: e.id || Math.random().toString(),
@@ -307,50 +402,7 @@ export default function Accounting() {
         amount: Number(w.estimated_loss) || (Number(w.quantity_lost) * Number(w.unit_cost || 0))
       }))
     ].sort((a, b) => new Date(b.date) - new Date(a.date))
-  }, [filteredSales, filteredExpenses, filteredWaste])
-
-  // Ranking Top 5 Bancos / Entidades más usados
-  const topBanksRanking = useMemo(() => {
-    const bankStats = {} // bankName -> { count, total }
-
-    filteredSales.forEach((s) => {
-      if (!s) return
-      if (s.bank_details && typeof s.bank_details === 'string' && s.bank_details.trim()) {
-        const parts = s.bank_details.split('|')
-        parts.forEach((part) => {
-          if (!part) return
-          const subParts = part.split(':')
-          if (subParts.length >= 2) {
-            const bName = subParts[0].trim()
-            const bAmountStr = subParts[1].replace(/[^0-9]/g, '')
-            const bAmount = Number(bAmountStr) || 0
-
-            if (bName) {
-              if (!bankStats[bName]) bankStats[bName] = { count: 0, total: 0 }
-              bankStats[bName].count += 1
-              bankStats[bName].total += bAmount
-            }
-          }
-        })
-      } else if (s.payment_method === 'transferencia') {
-        const bName = 'Transferencia General'
-        if (!bankStats[bName]) bankStats[bName] = { count: 0, total: 0 }
-        bankStats[bName].count += 1
-        bankStats[bName].total += (Number(s.transfer_amount) || Number(s.total) || 0)
-      }
-    })
-
-    const sorted = Object.entries(bankStats)
-      .map(([name, data]) => ({ name, ...data }))
-      .sort((a, b) => b.count - a.count || b.total - a.total)
-
-    const maxCount = sorted.length > 0 ? sorted[0].count : 1
-
-    return sorted.slice(0, 5).map((item) => ({
-      ...item,
-      percentage: Math.round((item.count / maxCount) * 100)
-    }))
-  }, [filteredSales])
+  }, [filteredSales, filteredIncomes, filteredExpenses, filteredWaste])
 
   // Top 10 Clientes que más han comprado
   const top10Customers = useMemo(() => {
@@ -428,6 +480,13 @@ export default function Accounting() {
             </div>
 
             <button
+              onClick={openIncomeModal}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-emerald-700 hover:bg-emerald-800 text-white font-extrabold text-xs shadow-md cursor-pointer transition-all border border-white/20"
+            >
+              <Plus className="w-4 h-4" /> Registrar Ingreso
+            </button>
+
+            <button
               onClick={openCreateModal}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-2xl bg-[#9F6839] hover:bg-[#835229] text-white font-extrabold text-xs shadow-md cursor-pointer transition-all border border-white/20"
             >
@@ -457,7 +516,7 @@ export default function Accounting() {
             ${(Number(summary.total_income) || 0).toLocaleString()}
           </div>
           <p className="text-[11px] text-[#9F6839] dark:text-[#DABA8C] mt-1 font-semibold">
-            Ventas realizadas: {summary.sales_count || 0}
+            Ventas: {summary.sales_count || 0} | Ingresos manuales: {summary.manual_income_count || 0} (${(Number(summary.manual_income) || 0).toLocaleString()})
           </p>
         </div>
 
@@ -528,59 +587,6 @@ export default function Accounting() {
         </div>
       </div>
 
-      {/* Ranking Top 5 Bancos / Entidades Más Usados */}
-      <div className="bg-white dark:bg-[#201009] border border-[#D4B28E] dark:border-[#9F6839]/40 rounded-3xl p-5 shadow-xs space-y-4">
-        <div className="flex items-center justify-between pb-3 border-b border-[#D4B28E]/40">
-          <div className="flex items-center gap-2">
-            <Building2 className="w-5 h-5 text-[#9F6839]" />
-            <h3 className="text-base font-extrabold text-[#432414] dark:text-[#FEE4D7]">
-              Ranking Top 5 Bancos / Entidades Más Usados
-            </h3>
-          </div>
-          <span className="text-xs font-bold text-[#9F6839]">
-            Basado en transferencias recibidas
-          </span>
-        </div>
-
-        {topBanksRanking.length === 0 ? (
-          <p className="text-xs text-[#9F6839] font-medium py-3 text-center">
-            No hay transferencias ni pagos digitales registrados en este periodo.
-          </p>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-            {topBanksRanking.map((bank, index) => (
-              <div
-                key={bank.name}
-                className="p-3.5 rounded-2xl bg-[#FEE4D7]/30 dark:bg-[#2A150C] border border-[#D4B28E]/50 space-y-2 relative"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-extrabold text-[#432414] dark:text-[#FEE4D7] flex items-center gap-1.5 truncate">
-                    <span className="w-5 h-5 rounded-full bg-[#9F6839] text-white text-[10px] flex items-center justify-center font-black shrink-0">
-                      #{index + 1}
-                    </span>
-                    <span className="truncate">{bank.name}</span>
-                  </span>
-                </div>
-
-                <div className="space-y-1">
-                  <div className="flex justify-between text-[11px] text-[#9F6839] font-bold">
-                    <span>{bank.count} {bank.count === 1 ? 'pago' : 'pagos'}</span>
-                    <span className="text-[#432414] dark:text-[#FEE4D7] font-extrabold">${(Number(bank.total) || 0).toLocaleString()}</span>
-                  </div>
-
-                  <div className="w-full h-1.5 bg-[#D4B28E]/30 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-[#9F6839] rounded-full transition-all duration-500"
-                      style={{ width: `${Math.max(10, bank.percentage)}%` }}
-                    />
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
       {/* Pestañas (Ingresos / Gastos / Flujo Combinado) */}
       <div className="flex items-center gap-2 border-b border-[#D4B28E]/40 pb-2 overflow-x-auto">
         <button
@@ -629,6 +635,7 @@ export default function Accounting() {
                   <th className="py-3.5 px-4">Cliente</th>
                   <th className="py-3.5 px-4">Método de Pago & Entidad</th>
                   <th className="py-3.5 px-4">Vendido Por</th>
+                  <th className="py-3.5 px-4">Estado</th>
                   <th className="py-3.5 px-4 text-right">Monto Ingresado</th>
                 </tr>
               </thead>
@@ -636,8 +643,9 @@ export default function Accounting() {
                 {filteredSales.map((s) => {
                   const pBadge = paymentBadges[s.payment_method] || paymentBadges.efectivo
                   const amt = Number(s.total) || 0
+                  const isCancelled = s.status === 'cancelada'
                   return (
-                    <tr key={s.id || Math.random()}>
+                    <tr key={s.id || Math.random()} className={isCancelled ? 'opacity-60' : ''}>
                       <td className="py-3.5 px-4 font-semibold">{s.created_at ? new Date(s.created_at).toLocaleString() : '—'}</td>
                       <td className="py-3.5 px-4 font-bold">{s.customer_name || 'Cliente General'}</td>
                       <td className="py-3.5 px-4">
@@ -653,15 +661,20 @@ export default function Accounting() {
                         </div>
                       </td>
                       <td className="py-3.5 px-4">{s.sold_by_username || 'Vendedor'}</td>
-                      <td className="py-3.5 px-4 text-right font-extrabold text-emerald-600 text-sm">
-                        +${amt.toLocaleString()}
+                      <td className="py-3.5 px-4">
+                        <span className={`px-2.5 py-0.5 rounded-full font-extrabold text-[10px] w-max uppercase tracking-wider ${isCancelled ? 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300' : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'}`}>
+                          {isCancelled ? 'Cancelada' : 'Completada'}
+                        </span>
+                      </td>
+                      <td className={`py-3.5 px-4 text-right font-extrabold text-sm ${isCancelled ? 'text-red-400 line-through' : 'text-emerald-600'}`}>
+                        {isCancelled ? `$${amt.toLocaleString()}` : `+$${amt.toLocaleString()}`}
                       </td>
                     </tr>
                   )
                 })}
                 {filteredSales.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="text-center py-8 text-[#9F6839] font-medium">
+                    <td colSpan={6} className="text-center py-8 text-[#9F6839] font-medium">
                       No hay ingresos registrados en este periodo.
                     </td>
                   </tr>
@@ -747,7 +760,7 @@ export default function Accounting() {
               </thead>
               <tbody className="divide-y divide-[#D4B28E]/30 text-[#432414] dark:text-[#FEE4D7]">
                 {combinedMovements.map((m) => (
-                  <tr key={m.id || Math.random()} className={m.type === 'income' ? 'bg-emerald-50/30 dark:bg-emerald-950/20' : m.type === 'expense' ? 'bg-red-50/30 dark:bg-red-950/20' : 'bg-amber-50/30 dark:bg-amber-950/20'}>
+                  <tr key={m.id || Math.random()} className={m.type === 'income' ? 'bg-emerald-50/30 dark:bg-emerald-950/20' : m.type === 'expense' ? 'bg-red-50/30 dark:bg-red-950/20' : m.type === 'cancelled' ? 'opacity-60' : 'bg-amber-50/30 dark:bg-amber-950/20'}>
                     <td className="py-3.5 px-4 font-semibold">{m.date ? new Date(m.date).toLocaleString() : '—'}</td>
                     <td className="py-3.5 px-4">
                       {m.type === 'income' ? (
@@ -758,6 +771,10 @@ export default function Accounting() {
                         <span className="px-2.5 py-0.5 rounded-full bg-red-100 text-red-800 font-extrabold text-[10px] uppercase tracking-wider inline-flex items-center gap-1">
                           <CircleDot className="w-3 h-3 text-red-600" /> Gasto
                         </span>
+                      ) : m.type === 'cancelled' ? (
+                        <span className="px-2.5 py-0.5 rounded-full bg-red-100 text-red-800 font-extrabold text-[10px] uppercase tracking-wider inline-flex items-center gap-1">
+                          <CircleDot className="w-3 h-3 text-red-600" /> Venta Cancelada
+                        </span>
                       ) : (
                         <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-extrabold text-[10px] uppercase tracking-wider inline-flex items-center gap-1">
                           <ShieldAlert className="w-3 h-3 text-amber-600" /> Pérdida/Merma
@@ -766,8 +783,8 @@ export default function Accounting() {
                     </td>
                     <td className="py-3.5 px-4 font-bold">{m.concept}</td>
                     <td className="py-3.5 px-4 text-[#9F6839] dark:text-[#DABA8C]">{m.details}</td>
-                    <td className={`py-3.5 px-4 text-right font-extrabold text-sm ${m.type === 'income' ? 'text-emerald-600' : 'text-red-600'}`}>
-                      {m.type === 'income' ? `+$${(Number(m.amount) || 0).toLocaleString()}` : `-$${(Number(m.amount) || 0).toLocaleString()}`}
+                    <td className={`py-3.5 px-4 text-right font-extrabold text-sm ${m.type === 'income' ? 'text-emerald-600' : m.type === 'cancelled' ? 'text-red-400 line-through' : 'text-red-600'}`}>
+                      {m.type === 'income' ? `+$${(Number(m.amount) || 0).toLocaleString()}` : m.type === 'cancelled' ? `$${(Number(m.amount) || 0).toLocaleString()}` : `-$${(Number(m.amount) || 0).toLocaleString()}`}
                     </td>
                   </tr>
                 ))}
@@ -776,6 +793,95 @@ export default function Accounting() {
           </div>
         </div>
       )}
+
+      {/* Modal Registrar Ingreso Manual */}
+      <Modal isOpen={isIncomeModalOpen} onClose={() => setIsIncomeModalOpen(false)} title="Registrar Ingreso Manual">
+        <form onSubmit={handleCreateIncome} className="space-y-4">
+          {incomeFormError && (
+            <div className="p-3.5 rounded-2xl bg-red-50 text-red-700 border border-red-200 text-xs font-bold">
+              ⚠️ {incomeFormError}
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs font-bold text-[#432414] dark:text-[#DABA8C] uppercase tracking-wider mb-1">
+              Descripción del Ingreso
+            </label>
+            <input
+              type="text"
+              value={incomeDescription}
+              onChange={(e) => setIncomeDescription(e.target.value)}
+              placeholder="Ej. Venta de equipo usado / Aporte de socio"
+              required
+              className="w-full px-3.5 py-2.5 rounded-2xl bg-white dark:bg-[#150904] border border-[#D4B28E] text-sm font-semibold text-[#432414] dark:text-[#FEE4D7]"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-[#432414] dark:text-[#DABA8C] uppercase tracking-wider mb-1">
+                Monto ($)
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                min="0.01"
+                value={incomeAmount}
+                onChange={(e) => setIncomeAmount(e.target.value)}
+                placeholder="0.00"
+                required
+                className="w-full px-3.5 py-2.5 rounded-2xl bg-white dark:bg-[#150904] border border-[#D4B28E] text-sm font-semibold text-[#432414] dark:text-[#FEE4D7]"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-[#432414] dark:text-[#DABA8C] uppercase tracking-wider mb-1">
+                Forma de Pago
+              </label>
+              <select
+                value={incomePaymentMethod}
+                onChange={(e) => setIncomePaymentMethod(e.target.value)}
+                className="w-full px-3.5 py-2.5 rounded-2xl bg-white dark:bg-[#150904] border border-[#D4B28E] text-sm font-semibold text-[#432414] dark:text-[#FEE4D7]"
+              >
+                <option value="efectivo">Efectivo</option>
+                <option value="transferencia">Transferencia</option>
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-[#432414] dark:text-[#DABA8C] uppercase tracking-wider mb-1">
+              Categoría
+            </label>
+            <select
+              value={incomeCategory}
+              onChange={(e) => setIncomeCategory(e.target.value)}
+              className="w-full px-3.5 py-2.5 rounded-2xl bg-white dark:bg-[#150904] border border-[#D4B28E] text-sm font-semibold text-[#432414] dark:text-[#FEE4D7]"
+            >
+              <option value="ventas_externas">Ventas Externas</option>
+              <option value="aportes">Aportes / Capital</option>
+              <option value="devoluciones">Devoluciones / Reembolsos</option>
+              <option value="otros">Otros Ingresos</option>
+            </select>
+          </div>
+
+          <div className="flex gap-3 justify-end pt-3">
+            <button
+              type="button"
+              onClick={() => setIsIncomeModalOpen(false)}
+              className="px-4 py-2.5 rounded-2xl bg-white dark:bg-[#201009] border border-[#D4B28E] text-xs font-bold text-[#432414] dark:text-[#FEE4D7] cursor-pointer"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              disabled={incomeSubmitting}
+              className="px-5 py-2.5 rounded-2xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-extrabold shadow-md cursor-pointer disabled:opacity-50"
+            >
+              {incomeSubmitting ? 'Guardando...' : 'Registrar Ingreso'}
+            </button>
+          </div>
+        </form>
+      </Modal>
 
       {/* Modal Registrar Gasto */}
       <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title="Registrar Nuevo Gasto / Egreso">
