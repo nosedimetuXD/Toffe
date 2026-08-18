@@ -2,9 +2,7 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -13,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/NosedimetuXD/cafeteria/internal/events"
-	custommw "github.com/NosedimetuXD/cafeteria/internal/middleware"
 	"github.com/NosedimetuXD/cafeteria/internal/models"
 )
 
@@ -58,8 +55,7 @@ func (h *WasteHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.DB.Query(r.Context(), query)
 	if err != nil {
-		log.Printf("error consultando mermas: %v", err)
-		http.Error(w, "error consultando reporte de daños", http.StatusInternalServerError)
+		serverError(w, "error consultando reporte de daños", err)
 		return
 	}
 	defer rows.Close()
@@ -69,15 +65,13 @@ func (h *WasteHandler) List(w http.ResponseWriter, r *http.Request) {
 		var item models.WasteReport
 		if err := rows.Scan(&item.ID, &item.IngredientID, &item.IngredientName, &item.Unit,
 			&item.QuantityLost, &item.UnitCost, &item.EstimatedLoss, &item.Reason, &item.ReportedBy, &item.ReporterName, &item.CreatedAt); err != nil {
-			log.Printf("error leyendo mermas: %v", err)
-			http.Error(w, "error leyendo reporte de daños", http.StatusInternalServerError)
+			serverError(w, "error leyendo reporte de daños", err)
 			return
 		}
 		list = append(list, item)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(list)
+	writeJSON(w, http.StatusOK, list)
 }
 
 // POST /waste — registra daño/pérdida de insumo y descuenta la cantidad del inventario
@@ -89,8 +83,7 @@ type createWasteRequest struct {
 
 func (h *WasteHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createWasteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -101,15 +94,7 @@ func (h *WasteHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	userVal := ctx.Value(custommw.ContextUserID)
-	var reportedBy uuid.UUID
-	if userVal != nil {
-		if id, ok := userVal.(uuid.UUID); ok {
-			reportedBy = id
-		} else if idStr, ok := userVal.(string); ok {
-			reportedBy, _ = uuid.Parse(idStr)
-		}
-	}
+	reportedBy := userIDFromContext(ctx)
 
 	var unitCost float64
 	_ = h.DB.QueryRow(ctx, `SELECT COALESCE(unit_cost, 0) FROM ingredients WHERE id = $1`, req.IngredientID).Scan(&unitCost)
@@ -118,8 +103,7 @@ func (h *WasteHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := h.DB.Begin(ctx)
 	if err != nil {
-		log.Printf("error iniciando transacción de merma: %v", err)
-		http.Error(w, "error interno", http.StatusInternalServerError)
+		serverError(w, "error interno", err)
 		return
 	}
 	defer tx.Rollback(ctx)
@@ -129,8 +113,7 @@ func (h *WasteHandler) Create(w http.ResponseWriter, r *http.Request) {
 		`UPDATE ingredients SET quantity = GREATEST(0, quantity - $1), updated_at = now() WHERE id = $2`,
 		req.QuantityLost, req.IngredientID)
 	if err != nil {
-		log.Printf("error descontando insumo por daño: %v", err)
-		http.Error(w, "error descontando insumo", http.StatusInternalServerError)
+		serverError(w, "error descontando insumo", err)
 		return
 	}
 	if tag.RowsAffected() == 0 {
@@ -144,17 +127,15 @@ func (h *WasteHandler) Create(w http.ResponseWriter, r *http.Request) {
 	err = tx.QueryRow(ctx,
 		`INSERT INTO waste_reports (ingredient_id, quantity_lost, unit_cost, estimated_loss, reason, reported_by)
 		 VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, created_at`,
-		req.IngredientID, req.QuantityLost, unitCost, estimatedLoss, reason, reportedBy,
+		req.IngredientID, req.QuantityLost, unitCost, estimatedLoss, reason, nullableUUID(reportedBy),
 	).Scan(&wasteID, &createdAt)
 	if err != nil {
-		log.Printf("error creando reporte de merma: %v", err)
-		http.Error(w, "error registrando reporte de daños", http.StatusInternalServerError)
+		serverError(w, "error registrando reporte de daños", err)
 		return
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		log.Printf("error confirmando transacción de merma: %v", err)
-		http.Error(w, "error interno", http.StatusInternalServerError)
+		serverError(w, "error interno", err)
 		return
 	}
 
@@ -166,9 +147,7 @@ func (h *WasteHandler) Create(w http.ResponseWriter, r *http.Request) {
 		"reason":         reason,
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"id":             wasteID,
 		"unit_cost":      unitCost,
 		"estimated_loss": estimatedLoss,

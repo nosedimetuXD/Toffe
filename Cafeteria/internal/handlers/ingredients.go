@@ -2,15 +2,9 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"log"
 	"net/http"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/NosedimetuXD/cafeteria/internal/events"
@@ -40,8 +34,7 @@ func (h *IngredientHandler) List(w http.ResponseWriter, r *http.Request) {
 		`SELECT id, name, unit, quantity, COALESCE(min_quantity, 5), COALESCE(unit_cost, 0), created_at, updated_at
 		 FROM ingredients ORDER BY name`)
 	if err != nil {
-		log.Printf("error consultando insumos: %v", err)
-		http.Error(w, "error consultando insumos", http.StatusInternalServerError)
+		serverError(w, "error consultando insumos", err)
 		return
 	}
 	defer rows.Close()
@@ -50,43 +43,33 @@ func (h *IngredientHandler) List(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var i models.Ingredient
 		if err := rows.Scan(&i.ID, &i.Name, &i.Unit, &i.Quantity, &i.MinQuantity, &i.UnitCost, &i.CreatedAt, &i.UpdatedAt); err != nil {
-			log.Printf("error leyendo insumos: %v", err)
-			http.Error(w, "error leyendo insumos", http.StatusInternalServerError)
+			serverError(w, "error leyendo insumos", err)
 			return
 		}
 		ingredients = append(ingredients, i)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(ingredients)
+	writeJSON(w, http.StatusOK, ingredients)
 }
 
 // GET /ingredients/{id}
 func (h *IngredientHandler) Get(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+	id, ok := parseIDParam(w, r)
+	if !ok {
 		return
 	}
 
 	var i models.Ingredient
-	err = h.DB.QueryRow(r.Context(),
+	err := h.DB.QueryRow(r.Context(),
 		`SELECT id, name, unit, quantity, COALESCE(min_quantity, 5), COALESCE(unit_cost, 0), created_at, updated_at
 		 FROM ingredients WHERE id = $1`, id,
 	).Scan(&i.ID, &i.Name, &i.Unit, &i.Quantity, &i.MinQuantity, &i.UnitCost, &i.CreatedAt, &i.UpdatedAt)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		http.Error(w, "insumo no encontrado", http.StatusNotFound)
-		return
-	}
 	if err != nil {
-		log.Printf("error consultando insumo: %v", err)
-		http.Error(w, "error consultando insumo", http.StatusInternalServerError)
+		queryError(w, err, "insumo no encontrado", "error consultando insumo")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(i)
+	writeJSON(w, http.StatusOK, i)
 }
 
 // POST /ingredients
@@ -100,8 +83,7 @@ type createIngredientRequest struct {
 
 func (h *IngredientHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createIngredientRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Name == "" || req.Unit == "" || req.Quantity < 0 {
@@ -117,14 +99,11 @@ func (h *IngredientHandler) Create(w http.ResponseWriter, r *http.Request) {
 		req.Name, req.Unit, req.Quantity, req.MinQuantity, req.UnitCost,
 	).Scan(&i.ID, &i.Name, &i.Unit, &i.Quantity, &i.MinQuantity, &i.UnitCost, &i.CreatedAt, &i.UpdatedAt)
 	if err != nil {
-		log.Printf("error creando insumo: %v", err)
-		http.Error(w, "error creando insumo", http.StatusInternalServerError)
+		serverError(w, "error creando insumo", err)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(i)
+	writeJSON(w, http.StatusCreated, i)
 }
 
 // PUT /ingredients/{id}
@@ -137,15 +116,13 @@ type updateIngredientRequest struct {
 }
 
 func (h *IngredientHandler) Update(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+	id, ok := parseIDParam(w, r)
+	if !ok {
 		return
 	}
 
 	var req updateIngredientRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Name == "" || req.Unit == "" || req.Quantity < 0 {
@@ -154,35 +131,27 @@ func (h *IngredientHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var i models.Ingredient
-	err = h.DB.QueryRow(r.Context(),
+	err := h.DB.QueryRow(r.Context(),
 		`UPDATE ingredients
 		 SET name = $1, unit = $2, quantity = $3, min_quantity = $4, unit_cost = $5, updated_at = now()
 		 WHERE id = $6
 		 RETURNING id, name, unit, quantity, COALESCE(min_quantity, 5), COALESCE(unit_cost, 0), created_at, updated_at`,
 		req.Name, req.Unit, req.Quantity, req.MinQuantity, req.UnitCost, id,
 	).Scan(&i.ID, &i.Name, &i.Unit, &i.Quantity, &i.MinQuantity, &i.UnitCost, &i.CreatedAt, &i.UpdatedAt)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		http.Error(w, "insumo no encontrado", http.StatusNotFound)
-		return
-	}
 	if err != nil {
-		log.Printf("error actualizando insumo: %v", err)
-		http.Error(w, "error actualizando insumo", http.StatusInternalServerError)
+		queryError(w, err, "insumo no encontrado", "error actualizando insumo")
 		return
 	}
 
 	h.Hub.Publish("inventory_updated", i)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(i)
+	writeJSON(w, http.StatusOK, i)
 }
 
 // DELETE /ingredients/{id}
 func (h *IngredientHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+	id, ok := parseIDParam(w, r)
+	if !ok {
 		return
 	}
 
@@ -191,8 +160,7 @@ func (h *IngredientHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	tag, err := h.DB.Exec(r.Context(), `DELETE FROM ingredients WHERE id = $1`, id)
 	if err != nil {
-		log.Printf("error borrando insumo: %v", err)
-		http.Error(w, "error borrando insumo", http.StatusInternalServerError)
+		serverError(w, "error borrando insumo", err)
 		return
 	}
 	if tag.RowsAffected() == 0 {

@@ -1,11 +1,9 @@
 package handlers
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -22,9 +20,8 @@ func NewRecipeHandler(db *pgxpool.Pool) *RecipeHandler {
 
 // GET /products/{id}/recipe
 func (h *RecipeHandler) Get(w http.ResponseWriter, r *http.Request) {
-	productID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+	productID, ok := parseIDParam(w, r)
+	if !ok {
 		return
 	}
 
@@ -35,8 +32,7 @@ func (h *RecipeHandler) Get(w http.ResponseWriter, r *http.Request) {
 		 WHERE pi.product_id = $1
 		 ORDER BY i.name`, productID)
 	if err != nil {
-		log.Printf("error consultando receta: %v", err)
-		http.Error(w, "error consultando receta", http.StatusInternalServerError)
+		serverError(w, "error consultando receta", err)
 		return
 	}
 	defer rows.Close()
@@ -45,15 +41,13 @@ func (h *RecipeHandler) Get(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var rl models.RecipeLine
 		if err := rows.Scan(&rl.IngredientID, &rl.IngredientName, &rl.QuantityUsed); err != nil {
-			log.Printf("error leyendo receta: %v", err)
-			http.Error(w, "error leyendo receta", http.StatusInternalServerError)
+			serverError(w, "error leyendo receta", err)
 			return
 		}
 		recipe = append(recipe, rl)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(recipe)
+	writeJSON(w, http.StatusOK, recipe)
 }
 
 // PUT /products/{id}/recipe — reemplaza toda la receta del producto
@@ -65,15 +59,13 @@ type setRecipeRequest struct {
 }
 
 func (h *RecipeHandler) Set(w http.ResponseWriter, r *http.Request) {
-	productID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+	productID, ok := parseIDParam(w, r)
+	if !ok {
 		return
 	}
 
 	var req setRecipeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	for _, item := range req.Items {
@@ -86,8 +78,7 @@ func (h *RecipeHandler) Set(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	tx, err := h.DB.Begin(ctx)
 	if err != nil {
-		log.Printf("error iniciando transacción: %v", err)
-		http.Error(w, "error interno", http.StatusInternalServerError)
+		serverError(w, "error interno", err)
 		return
 	}
 	defer tx.Rollback(ctx)
@@ -96,8 +87,7 @@ func (h *RecipeHandler) Set(w http.ResponseWriter, r *http.Request) {
 	var exists bool
 	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM products WHERE id = $1)`, productID).Scan(&exists)
 	if err != nil {
-		log.Printf("error verificando producto: %v", err)
-		http.Error(w, "error interno", http.StatusInternalServerError)
+		serverError(w, "error interno", err)
 		return
 	}
 	if !exists {
@@ -109,8 +99,7 @@ func (h *RecipeHandler) Set(w http.ResponseWriter, r *http.Request) {
 	// tratar de calcular diffs (qué se agregó, qué se quitó, qué cambió)
 	_, err = tx.Exec(ctx, `DELETE FROM product_ingredients WHERE product_id = $1`, productID)
 	if err != nil {
-		log.Printf("error borrando receta anterior: %v", err)
-		http.Error(w, "error interno", http.StatusInternalServerError)
+		serverError(w, "error interno", err)
 		return
 	}
 
@@ -127,8 +116,7 @@ func (h *RecipeHandler) Set(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		log.Printf("error confirmando receta: %v", err)
-		http.Error(w, "error interno", http.StatusInternalServerError)
+		serverError(w, "error interno", err)
 		return
 	}
 

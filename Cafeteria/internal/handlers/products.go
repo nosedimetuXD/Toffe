@@ -2,16 +2,11 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/NosedimetuXD/cafeteria/internal/models"
@@ -51,31 +46,22 @@ func NewProductHandler(db *pgxpool.Pool) *ProductHandler {
 
 // GET /products/{id}
 func (h *ProductHandler) Get(w http.ResponseWriter, r *http.Request) {
-	idParam := chi.URLParam(r, "id")
-	id, err := uuid.Parse(idParam)
-	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+	id, ok := parseIDParam(w, r)
+	if !ok {
 		return
 	}
 
 	var p models.Product
-	err = h.DB.QueryRow(r.Context(),
+	err := h.DB.QueryRow(r.Context(),
 		`SELECT id, name, description, price, COALESCE(category, 'Bebidas'), COALESCE(image_url, ''), active, created_at, updated_at
 		 FROM products WHERE id = $1`, id,
 	).Scan(&p.ID, &p.Name, &p.Description, &p.Price, &p.Category, &p.ImageURL, &p.Active, &p.CreatedAt, &p.UpdatedAt)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		http.Error(w, "producto no encontrado", http.StatusNotFound)
-		return
-	}
 	if err != nil {
-		log.Printf("error consultando producto: %v", err)
-		http.Error(w, "error consultando producto", http.StatusInternalServerError)
+		queryError(w, err, "producto no encontrado", "error consultando producto")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(p)
+	writeJSON(w, http.StatusOK, p)
 }
 
 // PUT /products/{id}
@@ -89,16 +75,13 @@ type updateProductRequest struct {
 }
 
 func (h *ProductHandler) Update(w http.ResponseWriter, r *http.Request) {
-	idParam := chi.URLParam(r, "id")
-	id, err := uuid.Parse(idParam)
-	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+	id, ok := parseIDParam(w, r)
+	if !ok {
 		return
 	}
 
 	var req updateProductRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Name == "" || req.Price < 0 {
@@ -111,34 +94,25 @@ func (h *ProductHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var p models.Product
-	err = h.DB.QueryRow(r.Context(),
+	err := h.DB.QueryRow(r.Context(),
 		`UPDATE products
 		 SET name = $1, description = $2, price = $3, category = $4, image_url = $5, active = $6, updated_at = now()
 		 WHERE id = $7
 		 RETURNING id, name, description, price, COALESCE(category, 'Bebidas'), COALESCE(image_url, ''), active, created_at, updated_at`,
 		req.Name, req.Description, req.Price, req.Category, req.ImageURL, req.Active, id,
 	).Scan(&p.ID, &p.Name, &p.Description, &p.Price, &p.Category, &p.ImageURL, &p.Active, &p.CreatedAt, &p.UpdatedAt)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		http.Error(w, "producto no encontrado", http.StatusNotFound)
-		return
-	}
 	if err != nil {
-		log.Printf("error actualizando producto: %v", err)
-		http.Error(w, "error actualizando producto", http.StatusInternalServerError)
+		queryError(w, err, "producto no encontrado", "error actualizando producto")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(p)
+	writeJSON(w, http.StatusOK, p)
 }
 
 // DELETE /products/{id}
 func (h *ProductHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	idParam := chi.URLParam(r, "id")
-	id, err := uuid.Parse(idParam)
-	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+	id, ok := parseIDParam(w, r)
+	if !ok {
 		return
 	}
 
@@ -204,8 +178,7 @@ func (h *ProductHandler) List(w http.ResponseWriter, r *http.Request) {
 		products = append(products, p)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(products)
+	writeJSON(w, http.StatusOK, products)
 }
 
 // POST /products
@@ -219,8 +192,7 @@ type createProductRequest struct {
 
 func (h *ProductHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createProductRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Name == "" || req.Price < 0 {
@@ -240,12 +212,9 @@ func (h *ProductHandler) Create(w http.ResponseWriter, r *http.Request) {
 		req.Name, req.Description, req.Price, req.Category, req.ImageURL,
 	).Scan(&p.ID, &p.Name, &p.Description, &p.Price, &p.Category, &p.ImageURL, &p.Active, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
-		log.Printf("error insertando producto: %v", err)
-		http.Error(w, "error creando producto", http.StatusInternalServerError)
+		serverError(w, "error creando producto", err)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(p)
+	writeJSON(w, http.StatusCreated, p)
 }

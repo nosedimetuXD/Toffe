@@ -3,6 +3,8 @@ import { api } from '../api/client'
 import Modal from '../components/Modal'
 import { useAuth } from '../context/AuthContext'
 import { AVAILABLE_UNITS, convertQuantity, formatConvertedHint } from '../utils/unitConverter'
+import { buildExpensePaymentMethod } from '../utils/paymentUtils'
+import { useBankLines } from '../hooks/useBankLines'
 import { Package, Plus, Minus, AlertTriangle, Search, Edit2, ShieldAlert, History, DollarSign, ArrowRightLeft, Trash2, CreditCard, Banknote, Smartphone, Building2 } from 'lucide-react'
 
 export default function Inventory() {
@@ -28,20 +30,14 @@ export default function Inventory() {
   const [addAsExpense, setAddAsExpense] = useState(false)
   const [expensePaymentMethod, setExpensePaymentMethod] = useState('efectivo')
   const [expenseCashAmount, setExpenseCashAmount] = useState('')
-  const [expenseBankLines, setExpenseBankLines] = useState([{ bank: 'Bre-B/Llave', amount: '' }])
 
-  function addExpenseBankLine() {
-    setExpenseBankLines((prev) => [...prev, { bank: 'Bre-B/Llave', amount: '' }])
-  }
-
-  function removeExpenseBankLine(index) {
-    if (expenseBankLines.length <= 1) return
-    setExpenseBankLines((prev) => prev.filter((_, i) => i !== index))
-  }
-
-  function updateExpenseBankLine(index, field, value) {
-    setExpenseBankLines((prev) => prev.map((item, i) => (i === index ? { ...item, [field]: value } : item)))
-  }
+  const {
+    lines: expenseBankLines,
+    addLine: addExpenseBankLine,
+    removeLine: removeExpenseBankLine,
+    updateLine: updateExpenseBankLine,
+    resetLines: resetExpenseBankLines
+  } = useBankLines()
 
   // Modal Reportar Daño / Merma
   const [isWasteModalOpen, setIsWasteModalOpen] = useState(false)
@@ -90,7 +86,7 @@ export default function Inventory() {
     setAddAsExpense(false)
     setExpensePaymentMethod('efectivo')
     setExpenseCashAmount('')
-    setExpenseBankLines([{ bank: 'Bre-B/Llave', amount: '' }])
+    resetExpenseBankLines()
     setFormError('')
     setIsModalOpen(true)
   }
@@ -140,19 +136,10 @@ export default function Inventory() {
         if (addAsExpense && (Number(quantity) * Number(unitCost)) > 0) {
           const totalExpenseAmount = Number(quantity) * Number(unitCost)
 
-          let finalPaymentMethod = expensePaymentMethod
-
-          const bankParts = expenseBankLines
-            .filter((l) => l.bank.trim() !== '')
-            .map((l) => (l.amount ? `${l.bank.trim()} ($${Number(l.amount).toLocaleString()})` : l.bank.trim()))
-
-          if (expensePaymentMethod === 'transferencia') {
-            finalPaymentMethod = bankParts.length > 0 ? `transferencia: ${bankParts.join(' + ')}` : 'transferencia'
-          } else if (expensePaymentMethod === 'mixto') {
-            const cashPart = expenseCashAmount ? `$${Number(expenseCashAmount).toLocaleString()} Efectivo` : 'Efectivo'
-            const bankStr = bankParts.length > 0 ? bankParts.join(' + ') : 'Transferencia'
-            finalPaymentMethod = `mixto (${cashPart} + ${bankStr})`
-          }
+          const finalPaymentMethod = buildExpensePaymentMethod(expensePaymentMethod, {
+            bankLines: expenseBankLines,
+            cashAmount: expenseCashAmount
+          })
 
           await api.post('/expenses', {
             description: `Compra inicial de insumo: ${name} (${quantity} ${unit})`,

@@ -5,19 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/NosedimetuXD/cafeteria/internal/events"
-	custommw "github.com/NosedimetuXD/cafeteria/internal/middleware"
 	"github.com/NosedimetuXD/cafeteria/internal/models"
 )
 
@@ -52,45 +48,7 @@ func NewSaleHandler(db *pgxpool.Pool, hub *events.Hub) *SaleHandler {
 
 // GET /sales?period=today|week|month|all&start_date=...&end_date=...&year=...&month_num=...
 func (h *SaleHandler) List(w http.ResponseWriter, r *http.Request) {
-	period := r.URL.Query().Get("period")
-	startDate := strings.TrimSpace(r.URL.Query().Get("start_date"))
-	endDate := strings.TrimSpace(r.URL.Query().Get("end_date"))
-	yearParam := strings.TrimSpace(r.URL.Query().Get("year"))
-	monthParam := strings.TrimSpace(r.URL.Query().Get("month_num"))
-
-	var rawCond string
-
-	if startDate != "" && endDate != "" {
-		rawCond = fmt.Sprintf("s.created_at >= '%s 00:00:00' AND s.created_at <= '%s 23:59:59'", startDate, endDate)
-	} else if yearParam != "" && monthParam != "" {
-		y, _ := strconv.Atoi(yearParam)
-		m, _ := strconv.Atoi(monthParam)
-		if y > 2000 && m >= 1 && m <= 12 {
-			rawCond = fmt.Sprintf("EXTRACT(YEAR FROM s.created_at) = %d AND EXTRACT(MONTH FROM s.created_at) = %d", y, m)
-		}
-	}
-
-	if rawCond == "" {
-		switch period {
-		case "today":
-			rawCond = "(s.created_at AT TIME ZONE 'America/Bogota')::date = (now() AT TIME ZONE 'America/Bogota')::date"
-		case "week":
-			rawCond = "s.created_at >= (now() - INTERVAL '7 days')"
-		case "month":
-			rawCond = "s.created_at >= date_trunc('month', now())"
-		case "prev_month":
-			rawCond = "s.created_at >= date_trunc('month', now() - INTERVAL '1 month') AND s.created_at < date_trunc('month', now())"
-		case "year":
-			rawCond = "s.created_at >= date_trunc('year', now())"
-		default: // "all"
-			rawCond = ""
-		}
-	}
-
-	var timeCondition string
-	if rawCond != "" {
-		timeCondition = "WHERE " + rawCond
-	}
+	timeCondition := parseTimeFilter(r).WhereClause("s.")
 
 	query := fmt.Sprintf(`SELECT s.id, s.sold_by, COALESCE(NULLIF(s.sold_by_name, ''), u.username, 'Personal'), COALESCE(s.customer_name, 'Cliente General'), 
 		        COALESCE(s.payment_method, 'efectivo'), COALESCE(s.cash_amount, 0), COALESCE(s.transfer_amount, 0), 
@@ -111,8 +69,7 @@ func (h *SaleHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.DB.Query(r.Context(), query)
 	if err != nil {
-		log.Printf("error consultando ventas: %v", err)
-		http.Error(w, "error consultando ventas", http.StatusInternalServerError)
+		serverError(w, "error consultando ventas", err)
 		return
 	}
 	defer rows.Close()
@@ -123,8 +80,7 @@ func (h *SaleHandler) List(w http.ResponseWriter, r *http.Request) {
 		var itemsJSON []byte
 		if err := rows.Scan(&s.ID, &s.SoldBy, &s.SoldByUsername, &s.CustomerName,
 			&s.PaymentMethod, &s.CashAmount, &s.TransferAmount, &s.BankDetails, &s.Total, &s.CreatedAt, &itemsJSON); err != nil {
-			log.Printf("error leyendo ventas: %v", err)
-			http.Error(w, "error leyendo ventas", http.StatusInternalServerError)
+			serverError(w, "error leyendo ventas", err)
 			return
 		}
 		if len(itemsJSON) > 0 {
@@ -133,20 +89,18 @@ func (h *SaleHandler) List(w http.ResponseWriter, r *http.Request) {
 		sales = append(sales, s)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(sales)
+	writeJSON(w, http.StatusOK, sales)
 }
 
 // GET /sales/{id} — incluye los items de esa venta con el nombre del producto
 func (h *SaleHandler) Get(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+	id, ok := parseIDParam(w, r)
+	if !ok {
 		return
 	}
 
 	var s models.Sale
-	err = h.DB.QueryRow(r.Context(),
+	err := h.DB.QueryRow(r.Context(),
 		`SELECT s.id, s.sold_by, COALESCE(u.username, ''), COALESCE(s.customer_name, 'Cliente General'), 
 		        COALESCE(s.payment_method, 'efectivo'), COALESCE(s.cash_amount, 0), COALESCE(s.transfer_amount, 0), 
 		        COALESCE(s.bank_details, ''), s.total, s.created_at 
@@ -155,14 +109,8 @@ func (h *SaleHandler) Get(w http.ResponseWriter, r *http.Request) {
 		 WHERE s.id = $1`, id,
 	).Scan(&s.ID, &s.SoldBy, &s.SoldByUsername, &s.CustomerName,
 		&s.PaymentMethod, &s.CashAmount, &s.TransferAmount, &s.BankDetails, &s.Total, &s.CreatedAt)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		http.Error(w, "venta no encontrada", http.StatusNotFound)
-		return
-	}
 	if err != nil {
-		log.Printf("error consultando venta: %v", err)
-		http.Error(w, "error consultando venta", http.StatusInternalServerError)
+		queryError(w, err, "venta no encontrada", "error consultando venta")
 		return
 	}
 
@@ -172,8 +120,7 @@ func (h *SaleHandler) Get(w http.ResponseWriter, r *http.Request) {
 		 LEFT JOIN products p ON si.product_id = p.id
 		 WHERE si.sale_id = $1`, id)
 	if err != nil {
-		log.Printf("error consultando items: %v", err)
-		http.Error(w, "error consultando items", http.StatusInternalServerError)
+		serverError(w, "error consultando items", err)
 		return
 	}
 	defer rows.Close()
@@ -181,15 +128,13 @@ func (h *SaleHandler) Get(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var item models.SaleItem
 		if err := rows.Scan(&item.ProductID, &item.ProductName, &item.Quantity, &item.UnitPrice); err != nil {
-			log.Printf("error leyendo items: %v", err)
-			http.Error(w, "error leyendo items", http.StatusInternalServerError)
+			serverError(w, "error leyendo items", err)
 			return
 		}
 		s.Items = append(s.Items, item)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s)
+	writeJSON(w, http.StatusOK, s)
 }
 
 // POST /sales — crea venta, descuenta insumos y genera comanda en tiempo real
@@ -208,8 +153,7 @@ type createSaleRequest struct {
 
 func (h *SaleHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createSaleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if len(req.Items) == 0 {
@@ -238,20 +182,11 @@ func (h *SaleHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	soldByVal := ctx.Value(custommw.ContextUserID)
-	var soldBy uuid.UUID
-	if soldByVal != nil {
-		if id, ok := soldByVal.(uuid.UUID); ok {
-			soldBy = id
-		} else if idStr, ok := soldByVal.(string); ok {
-			soldBy, _ = uuid.Parse(idStr)
-		}
-	}
+	soldBy := userIDFromContext(ctx)
 
 	tx, err := h.DB.Begin(ctx)
 	if err != nil {
-		log.Printf("error iniciando transacción: %v", err)
-		http.Error(w, "error interno", http.StatusInternalServerError)
+		serverError(w, "error interno", err)
 		return
 	}
 	defer tx.Rollback(ctx)
@@ -279,8 +214,7 @@ func (h *SaleHandler) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			log.Printf("error consultando producto: %v", err)
-			http.Error(w, "error interno", http.StatusInternalServerError)
+			serverError(w, "error interno", err)
 			return
 		}
 		if !active {
@@ -320,8 +254,7 @@ func (h *SaleHandler) Create(w http.ResponseWriter, r *http.Request) {
 			`SELECT ingredient_id, quantity_used FROM product_ingredients WHERE product_id = $1`,
 			item.ProductID)
 		if err != nil {
-			log.Printf("error consultando receta: %v", err)
-			http.Error(w, "error interno", http.StatusInternalServerError)
+			serverError(w, "error interno", err)
 			return
 		}
 
@@ -334,8 +267,7 @@ func (h *SaleHandler) Create(w http.ResponseWriter, r *http.Request) {
 			var rl recipeLine
 			if err := rows.Scan(&rl.IngredientID, &rl.QtyUsed); err != nil {
 				rows.Close()
-				log.Printf("error leyendo receta: %v", err)
-				http.Error(w, "error interno", http.StatusInternalServerError)
+				serverError(w, "error interno", err)
 				return
 			}
 			recipe = append(recipe, rl)
@@ -349,8 +281,7 @@ func (h *SaleHandler) Create(w http.ResponseWriter, r *http.Request) {
 				 WHERE id = $2 AND quantity >= $1`,
 				needed, rl.IngredientID)
 			if err != nil {
-				log.Printf("error descontando insumo: %v", err)
-				http.Error(w, "error interno", http.StatusInternalServerError)
+				serverError(w, "error interno", err)
 				return
 			}
 			if tag.RowsAffected() == 0 {
@@ -373,8 +304,7 @@ func (h *SaleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		soldBy, soldByName, total, customerName, paymentMethod, cashAmount, transferAmount, strings.TrimSpace(req.BankDetails),
 	).Scan(&saleID)
 	if err != nil {
-		log.Printf("error creando venta: %v", err)
-		http.Error(w, "error interno", http.StatusInternalServerError)
+		serverError(w, "error interno", err)
 		return
 	}
 
@@ -385,8 +315,7 @@ func (h *SaleHandler) Create(w http.ResponseWriter, r *http.Request) {
 			 VALUES ($1, $2, $3, $4, $5)`,
 			saleID, item.ProductID, item.ProductName, item.Quantity, item.UnitPrice)
 		if err != nil {
-			log.Printf("error creando item de venta: %v", err)
-			http.Error(w, "error interno", http.StatusInternalServerError)
+			serverError(w, "error interno", err)
 			return
 		}
 	}
@@ -400,8 +329,7 @@ func (h *SaleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		saleID, customerName,
 	).Scan(&comandaID, &orderNumber)
 	if err != nil {
-		log.Printf("error generando comanda: %v", err)
-		http.Error(w, "error interno generando comanda", http.StatusInternalServerError)
+		serverError(w, "error interno generando comanda", err)
 		return
 	}
 
@@ -412,8 +340,7 @@ func (h *SaleHandler) Create(w http.ResponseWriter, r *http.Request) {
 			 VALUES ($1, $2, $3, $4, $5)`,
 			comandaID, item.ProductID, item.ProductName, item.Quantity, item.Notes)
 		if err != nil {
-			log.Printf("error registrando item de comanda: %v", err)
-			http.Error(w, "error interno registrando comanda", http.StatusInternalServerError)
+			serverError(w, "error interno registrando comanda", err)
 			return
 		}
 		comandaItems = append(comandaItems, models.ComandaItem{
@@ -426,17 +353,16 @@ func (h *SaleHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	// 6. Confirmar la transacción
 	if err := tx.Commit(ctx); err != nil {
-		log.Printf("error confirmando venta y comanda: %v", err)
-		http.Error(w, "error interno", http.StatusInternalServerError)
+		serverError(w, "error interno", err)
 		return
 	}
 
 	// Notificar vía eventos SSE
 	h.Hub.Publish("sale_created", map[string]interface{}{
-		"id":              saleID,
-		"customer_name":   customerName,
-		"payment_method":  paymentMethod,
-		"total":           total,
+		"id":             saleID,
+		"customer_name":  customerName,
+		"payment_method": paymentMethod,
+		"total":          total,
 	})
 
 	h.Hub.Publish("comanda_created", map[string]interface{}{
@@ -451,9 +377,7 @@ func (h *SaleHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// Publicar actualización de inventario también
 	h.Hub.Publish("inventory_updated", map[string]interface{}{"action": "sale_deduction"})
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"id":            saleID,
 		"comanda_id":    comandaID,
 		"order_number":  orderNumber,

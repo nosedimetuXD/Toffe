@@ -1,19 +1,14 @@
 package handlers
 
 import (
-	"encoding/json"
 	"errors"
-	"fmt"
-	"log"
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/NosedimetuXD/cafeteria/internal/events"
-	custommw "github.com/NosedimetuXD/cafeteria/internal/middleware"
 	"github.com/NosedimetuXD/cafeteria/internal/models"
 )
 
@@ -36,8 +31,7 @@ func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
 		 LEFT JOIN users uc ON t.created_by = uc.id
 		 ORDER BY t.due_date NULLS LAST, t.created_at DESC`)
 	if err != nil {
-		log.Printf("error consultando tareas: %v", err)
-		http.Error(w, "error consultando tareas", http.StatusInternalServerError)
+		serverError(w, "error consultando tareas", err)
 		return
 	}
 	defer rows.Close()
@@ -46,15 +40,13 @@ func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var t models.Task
 		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.AssignedTo, &t.AssignedToName, &t.CreatedBy, &t.CreatedByName, &t.Status, &t.DueDate, &t.CreatedAt, &t.UpdatedAt); err != nil {
-			log.Printf("error leyendo tareas: %v", err)
-			http.Error(w, "error leyendo tareas", http.StatusInternalServerError)
+			serverError(w, "error leyendo tareas", err)
 			return
 		}
 		tasks = append(tasks, t)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(tasks)
+	writeJSON(w, http.StatusOK, tasks)
 }
 
 // POST /tasks — solo owner y admin
@@ -67,8 +59,7 @@ type createTaskRequest struct {
 
 func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createTaskRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Title == "" {
@@ -76,7 +67,7 @@ func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	createdBy := r.Context().Value(custommw.ContextUserID)
+	createdBy := nullableUUID(userIDFromContext(r.Context()))
 
 	var t models.Task
 	err := h.DB.QueryRow(r.Context(),
@@ -86,16 +77,13 @@ func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
 		req.Title, req.Description, req.AssignedTo, createdBy, req.DueDate,
 	).Scan(&t.ID, &t.Title, &t.Description, &t.AssignedTo, &t.CreatedBy, &t.Status, &t.DueDate, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
-		log.Printf("error creando tarea: %v", err)
-		http.Error(w, "error creando tarea", http.StatusInternalServerError)
+		serverError(w, "error creando tarea", err)
 		return
 	}
 
 	h.Hub.Publish("task created", t)
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(t)
+	writeJSON(w, http.StatusCreated, t)
 }
 
 // PUT /tasks/{id} — editar título/descripción/asignación: solo owner y admin
@@ -107,15 +95,13 @@ type updateTaskRequest struct {
 }
 
 func (h *TaskHandler) Update(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+	id, ok := parseIDParam(w, r)
+	if !ok {
 		return
 	}
 
 	var req updateTaskRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Title == "" {
@@ -124,28 +110,21 @@ func (h *TaskHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var t models.Task
-	err = h.DB.QueryRow(r.Context(),
+	err := h.DB.QueryRow(r.Context(),
 		`UPDATE tasks
 		 SET title = $1, description = $2, assigned_to = $3, due_date = $4
 		 WHERE id = $5
 		 RETURNING id, title, description, assigned_to, created_by, status, due_date, created_at, updated_at`,
 		req.Title, req.Description, req.AssignedTo, req.DueDate, id,
 	).Scan(&t.ID, &t.Title, &t.Description, &t.AssignedTo, &t.CreatedBy, &t.Status, &t.DueDate, &t.CreatedAt, &t.UpdatedAt)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		http.Error(w, "tarea no encontrada", http.StatusNotFound)
-		return
-	}
 	if err != nil {
-		log.Printf("error actualizando tarea: %v", err)
-		http.Error(w, "error actualizando tarea", http.StatusInternalServerError)
+		queryError(w, err, "tarea no encontrada", "error actualizando tarea")
 		return
 	}
 
 	h.Hub.Publish("task status updated", t)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(t)
+	writeJSON(w, http.StatusOK, t)
 }
 
 // PATCH /tasks/{id}/status — cambio de estado con validación de asignado
@@ -154,15 +133,13 @@ type updateStatusRequest struct {
 }
 
 func (h *TaskHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+	id, ok := parseIDParam(w, r)
+	if !ok {
 		return
 	}
 
 	var req updateStatusRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -181,30 +158,16 @@ func (h *TaskHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	var currentTask models.Task
-	err = h.DB.QueryRow(ctx, `SELECT id, assigned_to, created_by, status FROM tasks WHERE id = $1`, id).Scan(&currentTask.ID, &currentTask.AssignedTo, &currentTask.CreatedBy, &currentTask.Status)
+	err := h.DB.QueryRow(ctx, `SELECT id, assigned_to, created_by, status FROM tasks WHERE id = $1`, id).Scan(&currentTask.ID, &currentTask.AssignedTo, &currentTask.CreatedBy, &currentTask.Status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "tarea no encontrada", http.StatusNotFound)
 		return
 	}
 
-	userVal := ctx.Value(custommw.ContextUserID)
-	roleVal := ctx.Value(custommw.ContextRole)
+	currentUserID := userIDFromContext(ctx)
+	userRole := userRoleFromContext(ctx)
 
-	var currentUserID uuid.UUID
-	if userVal != nil {
-		if val, ok := userVal.(uuid.UUID); ok {
-			currentUserID = val
-		} else if valStr, ok := userVal.(string); ok {
-			currentUserID, _ = uuid.Parse(valStr)
-		}
-	}
-
-	userRole := ""
-	if roleVal != nil {
-		userRole = fmt.Sprintf("%v", roleVal)
-	}
-
-	if currentTask.AssignedTo != nil && *currentTask.AssignedTo != currentUserID && userRole != "owner" && userRole != "admin" && currentTask.CreatedBy != currentUserID {
+	if currentTask.AssignedTo != nil && *currentTask.AssignedTo != currentUserID && userRole != models.RoleOwner && userRole != models.RoleAdmin && currentTask.CreatedBy != currentUserID {
 		http.Error(w, "Solo el usuario asignado o un administrador pueden modificar el estado de esta tarea", http.StatusForbidden)
 		return
 	}
@@ -215,33 +178,24 @@ func (h *TaskHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		 RETURNING id, title, description, assigned_to, created_by, status, due_date, created_at, updated_at`,
 		req.Status, id,
 	).Scan(&t.ID, &t.Title, &t.Description, &t.AssignedTo, &t.CreatedBy, &t.Status, &t.DueDate, &t.CreatedAt, &t.UpdatedAt)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		http.Error(w, "tarea no encontrada", http.StatusNotFound)
-		return
-	}
 	if err != nil {
-		log.Printf("error actualizando estado: %v", err)
-		http.Error(w, "error actualizando estado", http.StatusInternalServerError)
+		queryError(w, err, "tarea no encontrada", "error actualizando estado")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(t)
+	writeJSON(w, http.StatusOK, t)
 }
 
 // DELETE /tasks/{id} — solo owner y admin
 func (h *TaskHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+	id, ok := parseIDParam(w, r)
+	if !ok {
 		return
 	}
 
 	tag, err := h.DB.Exec(r.Context(), `DELETE FROM tasks WHERE id = $1`, id)
 	if err != nil {
-		log.Printf("error borrando tarea: %v", err)
-		http.Error(w, "error borrando tarea", http.StatusInternalServerError)
+		serverError(w, "error borrando tarea", err)
 		return
 	}
 	if tag.RowsAffected() == 0 {

@@ -3,6 +3,8 @@ import { api } from '../api/client'
 import Modal from '../components/Modal'
 import confetti from 'canvas-confetti'
 import { processImageUrl } from '../utils/imageUtils'
+import { bankDetailsString, createBankLine } from '../utils/paymentUtils'
+import { useBankLines } from '../hooks/useBankLines'
 import {
   Search,
   Plus,
@@ -57,9 +59,19 @@ export default function Sales() {
   const [transferAmount, setTransferAmount] = useState('')
   
   // Desglose de Bancos / Entidades para Transferencia y Pago Mixto
-  const [bankPayments, setBankPayments] = useState([
-    { bank: 'Bre-B/Llave', amount: '' }
-  ])
+  const {
+    lines: bankPayments,
+    setLines: setBankPayments,
+    addLine: addBankLine,
+    removeLine: removeBankLine,
+    updateLine: updateBankLine
+  } = useBankLines((nextLines, field) => {
+    // Auto-calcular suma de transferencias
+    if (field === 'amount') {
+      const sumTransfers = nextLines.reduce((sum, item) => sum + (Number(item.amount) || 0), 0)
+      setTransferAmount(String(sumTransfers))
+    }
+  })
 
   const [submitting, setSubmitting] = useState(false)
   const [checkoutError, setCheckoutError] = useState('')
@@ -162,15 +174,13 @@ export default function Sales() {
     })
   }, [products, selectedCategory, searchQuery])
 
-  const COMMON_BANKS = ['Bre-B/Llave', 'Nequi', 'Daviplata', 'Bancolombia', 'Nu', 'Davivienda', 'BBVA', 'Banco de Bogotá']
-
   function openCheckout() {
     if (cartItems.length === 0) return
     setCustomerName('')
     setPaymentMethod('efectivo')
     setCashAmount(String(cartTotal))
     setTransferAmount('0')
-    setBankPayments([{ bank: 'Bre-B/Llave', amount: String(cartTotal) }])
+    setBankPayments([createBankLine(String(cartTotal))])
     setCheckoutError('')
     setIsCheckoutOpen(true)
   }
@@ -184,36 +194,13 @@ export default function Sales() {
     } else if (method === 'transferencia') {
       setCashAmount('0')
       setTransferAmount(String(cartTotal))
-      setBankPayments([{ bank: 'Bre-B/Llave', amount: String(cartTotal) }])
+      setBankPayments([createBankLine(String(cartTotal))])
     } else if (method === 'mixto') {
       const half = Math.round(cartTotal / 2)
       setCashAmount(String(half))
       setTransferAmount(String(cartTotal - half))
-      setBankPayments([{ bank: 'Bre-B/Llave', amount: String(cartTotal - half) }])
+      setBankPayments([createBankLine(String(cartTotal - half))])
     }
-  }
-
-  // Manejo de desglose de bancos
-  function addBankLine() {
-    setBankPayments((prev) => [...prev, { bank: 'Bre-B/Llave', amount: '' }])
-  }
-
-  function removeBankLine(index) {
-    if (bankPayments.length <= 1) return
-    setBankPayments((prev) => prev.filter((_, i) => i !== index))
-  }
-
-  function updateBankLine(index, field, value) {
-    setBankPayments((prev) => {
-      const next = prev.map((item, i) => (i === index ? { ...item, [field]: value } : item))
-      
-      // Auto-calcular suma de transferencias
-      if (field === 'amount') {
-        const sumTransfers = next.reduce((sum, item) => sum + (Number(item.amount) || 0), 0)
-        setTransferAmount(String(sumTransfers))
-      }
-      return next
-    })
   }
 
   async function handleConfirmSale(e) {
@@ -273,7 +260,7 @@ export default function Sales() {
         return
       }
 
-      bankDetailsStr = bankPayments.map((b) => `${b.bank.trim()}: $${Number(b.amount).toLocaleString()}`).join(' | ')
+      bankDetailsStr = bankDetailsString(bankPayments)
     } else if (paymentMethod === 'mixto') {
       if (numCash <= 0) {
         setCheckoutError('En Pago Mixto el abono en efectivo debe ser mayor a $0. (Si no hay efectivo, usa el método Transferencia).')
@@ -324,7 +311,7 @@ export default function Sales() {
         return
       }
 
-      bankDetailsStr = bankPayments.map((b) => `${b.bank.trim()}: $${Number(b.amount).toLocaleString()}`).join(' | ')
+      bankDetailsStr = bankDetailsString(bankPayments)
     }
 
     try {

@@ -1,6 +1,8 @@
 import { useEffect, useState, useMemo } from 'react'
 import { api } from '../api/client'
 import Modal from '../components/Modal'
+import { usePeriodFilter } from '../hooks/usePeriodFilter'
+import { MONTH_NAMES, buildPeriodQuery } from '../utils/periodFilter'
 import {
   Search,
   FileText,
@@ -19,21 +21,6 @@ import {
   Filter
 } from 'lucide-react'
 
-const MONTH_NAMES = [
-  { num: 1, short: 'ene.', full: 'Enero' },
-  { num: 2, short: 'feb.', full: 'Febrero' },
-  { num: 3, short: 'mar.', full: 'Marzo' },
-  { num: 4, short: 'abr.', full: 'Abril' },
-  { num: 5, short: 'may.', full: 'Mayo' },
-  { num: 6, short: 'jun.', full: 'Junio' },
-  { num: 7, short: 'jul.', full: 'Julio' },
-  { num: 8, short: 'ago.', full: 'Agosto' },
-  { num: 9, short: 'sep.', full: 'Septiembre' },
-  { num: 10, short: 'oct.', full: 'Octubre' },
-  { num: 11, short: 'nov.', full: 'Noviembre' },
-  { num: 12, short: 'dic.', full: 'Diciembre' }
-]
-
 export default function SalesHistory() {
   const [sales, setSales] = useState([])
   const [searchQuery, setSearchQuery] = useState('')
@@ -46,29 +33,34 @@ export default function SalesHistory() {
   const [isReceiptOpen, setIsReceiptOpen] = useState(false)
 
   // Control de filtro de periodos (Predeterminado: Histórico Total)
-  const [isFilterModalOpen, setIsFilterModalOpen] = useState(false)
-  const [activeTab, setActiveTab] = useState('preset')
-  const [displayLabel, setDisplayLabel] = useState('Histórico Total')
-  const [period, setPeriod] = useState('all')
-  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear())
-  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1)
-  const [startDate, setStartDate] = useState('')
-  const [endDate, setEndDate] = useState('')
+  const {
+    isFilterModalOpen,
+    setIsFilterModalOpen,
+    activeTab,
+    setActiveTab,
+    displayLabel,
+    period,
+    selectedYear,
+    setSelectedYear,
+    selectedMonth,
+    startDate,
+    setStartDate,
+    endDate,
+    setEndDate,
+    selectPreset: handleSelectPreset,
+    selectMonthYear: handleSelectMonthYear,
+    applyCustomRange: handleApplyCustomRange
+  } = usePeriodFilter({
+    initialPeriod: 'all',
+    initialLabel: 'Histórico Total',
+    onApply: (params) => loadSales(params)
+  })
 
   async function loadSales(params = {}) {
     setLoading(true)
     setPageError('')
     try {
-      let queryStr = ''
-      if (params.startDate && params.endDate) {
-        queryStr = `start_date=${params.startDate}&end_date=${params.endDate}`
-      } else if (params.year && params.monthNum) {
-        queryStr = `year=${params.year}&month_num=${params.monthNum}`
-      } else {
-        queryStr = `period=${params.period || period}`
-      }
-
-      const data = await api.get(`/sales?${queryStr}`)
+      const data = await api.get(`/sales?${buildPeriodQuery(params, period)}`)
       setSales(data || [])
     } catch (err) {
       setPageError('No se pudo cargar el historial de ventas')
@@ -80,32 +72,6 @@ export default function SalesHistory() {
   useEffect(() => {
     loadSales({ period: 'all' })
   }, [])
-
-  function handleSelectPreset(presetKey, label) {
-    setPeriod(presetKey)
-    setDisplayLabel(label)
-    setIsFilterModalOpen(false)
-    loadSales({ period: presetKey })
-  }
-
-  function handleSelectMonthYear(year, monthNum, monthFull) {
-    setSelectedYear(year)
-    setSelectedMonth(monthNum)
-    setDisplayLabel(`${monthFull} de ${year}`)
-    setIsFilterModalOpen(false)
-    loadSales({ year, monthNum })
-  }
-
-  function handleApplyCustomRange(e) {
-    e.preventDefault()
-    if (!startDate || !endDate) {
-      alert('Por favor selecciona una fecha de inicio y de fin')
-      return
-    }
-    setDisplayLabel(`${startDate} al ${endDate}`)
-    setIsFilterModalOpen(false)
-    loadSales({ startDate, endDate })
-  }
 
   const filteredSales = useMemo(() => {
     return sales.filter((s) => {

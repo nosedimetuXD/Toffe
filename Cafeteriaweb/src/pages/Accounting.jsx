@@ -2,6 +2,8 @@ import { useEffect, useState, useMemo } from 'react'
 import { api } from '../api/client'
 import Modal from '../components/Modal'
 import { AVAILABLE_UNITS, convertQuantity, formatConvertedHint } from '../utils/unitConverter'
+import { buildExpensePaymentMethod } from '../utils/paymentUtils'
+import { useBankLines } from '../hooks/useBankLines'
 import {
   DollarSign,
   Plus,
@@ -44,25 +46,19 @@ export default function Accounting() {
   const [category, setCategory] = useState('insumos')
   const [paymentMethod, setPaymentMethod] = useState('efectivo')
   const [expenseCashAmount, setExpenseCashAmount] = useState('')
-  const [expenseBankLines, setExpenseBankLines] = useState([{ bank: 'Bre-B/Llave', amount: '' }])
   const [ingredientId, setIngredientId] = useState('')
   const [quantityAdded, setQuantityAdded] = useState('')
   const [addedUnit, setAddedUnit] = useState('ml')
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState('')
 
-  function addExpenseBankLine() {
-    setExpenseBankLines((prev) => [...prev, { bank: 'Bre-B/Llave', amount: '' }])
-  }
-
-  function removeExpenseBankLine(index) {
-    if (expenseBankLines.length <= 1) return
-    setExpenseBankLines((prev) => prev.filter((_, i) => i !== index))
-  }
-
-  function updateExpenseBankLine(index, field, value) {
-    setExpenseBankLines((prev) => prev.map((item, i) => (i === index ? { ...item, [field]: value } : item)))
-  }
+  const {
+    lines: expenseBankLines,
+    addLine: addExpenseBankLine,
+    removeLine: removeExpenseBankLine,
+    updateLine: updateExpenseBankLine,
+    resetLines: resetExpenseBankLines
+  } = useBankLines()
 
   async function loadData() {
     setLoading(true)
@@ -96,7 +92,7 @@ export default function Accounting() {
     setCategory('insumos')
     setPaymentMethod('efectivo')
     setExpenseCashAmount('')
-    setExpenseBankLines([{ bank: 'Bre-B/Llave', amount: '' }])
+    resetExpenseBankLines()
     setIngredientId('')
     setQuantityAdded('')
     setAddedUnit('ml')
@@ -115,19 +111,10 @@ export default function Accounting() {
     setFormError('')
 
     try {
-      let finalPaymentMethod = paymentMethod
-
-      const bankParts = expenseBankLines
-        .filter((l) => l.bank.trim() !== '')
-        .map((l) => (l.amount ? `${l.bank.trim()} ($${Number(l.amount).toLocaleString()})` : l.bank.trim()))
-
-      if (paymentMethod === 'transferencia') {
-        finalPaymentMethod = bankParts.length > 0 ? `transferencia: ${bankParts.join(' + ')}` : 'transferencia'
-      } else if (paymentMethod === 'mixto') {
-        const cashPart = expenseCashAmount ? `$${Number(expenseCashAmount).toLocaleString()} Efectivo` : 'Efectivo'
-        const bankStr = bankParts.length > 0 ? bankParts.join(' + ') : 'Transferencia'
-        finalPaymentMethod = `mixto (${cashPart} + ${bankStr})`
-      }
+      const finalPaymentMethod = buildExpensePaymentMethod(paymentMethod, {
+        bankLines: expenseBankLines,
+        cashAmount: expenseCashAmount
+      })
 
       await api.post('/expenses', {
         description,

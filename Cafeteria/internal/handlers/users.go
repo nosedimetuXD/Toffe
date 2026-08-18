@@ -2,22 +2,16 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
-	custommw "github.com/NosedimetuXD/cafeteria/internal/middleware"
 	"github.com/NosedimetuXD/cafeteria/internal/models"
 )
 
@@ -44,8 +38,7 @@ type createUserRequest struct {
 // POST /users
 func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -68,8 +61,7 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		log.Printf("error generando hash: %v", err)
-		http.Error(w, "error interno", http.StatusInternalServerError)
+		serverError(w, "error interno", err)
 		return
 	}
 
@@ -78,23 +70,18 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 		`INSERT INTO users (username, password_hash, role, avatar_url, created_by)
 		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, username, role, COALESCE(avatar_url, ''), created_by, created_at`,
-		req.Username, string(hash), req.Role, req.AvatarURL, r.Context().Value(custommw.ContextUserID),
+		req.Username, string(hash), req.Role, req.AvatarURL, nullableUUID(userIDFromContext(r.Context())),
 	).Scan(&user.ID, &user.Username, &user.Role, &user.AvatarURL, &user.CreatedBy, &user.CreatedAt)
-
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
+		if isUniqueViolation(err) {
 			http.Error(w, "ese nombre de usuario ya existe", http.StatusConflict)
 			return
 		}
-		log.Printf("error creando usuario: %v", err)
-		http.Error(w, "error creando usuario", http.StatusInternalServerError)
+		serverError(w, "error creando usuario", err)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(user)
+	writeJSON(w, http.StatusCreated, user)
 }
 
 type updateUserRequest struct {
@@ -106,15 +93,13 @@ type updateUserRequest struct {
 
 // PUT /users/{id}
 func (h *UserHandler) Update(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		http.Error(w, "id de usuario inválido", http.StatusBadRequest)
+	id, ok := parseIDParam(w, r, "id de usuario inválido")
+	if !ok {
 		return
 	}
 
 	var req updateUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -141,16 +126,16 @@ func (h *UserHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var user models.User
+	var err error
 	if strings.TrimSpace(req.Password) != "" {
 		if len(req.Password) < 8 {
 			http.Error(w, "la contraseña debe tener al menos 8 caracteres", http.StatusBadRequest)
 			return
 		}
 
-		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-		if err != nil {
-			log.Printf("error generando hash: %v", err)
-			http.Error(w, "error interno", http.StatusInternalServerError)
+		hash, hashErr := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		if hashErr != nil {
+			serverError(w, "error interno", hashErr)
 			return
 		}
 
@@ -171,25 +156,18 @@ func (h *UserHandler) Update(w http.ResponseWriter, r *http.Request) {
 		).Scan(&user.ID, &user.Username, &user.Role, &user.AvatarURL, &user.CreatedBy, &user.CreatedAt)
 	}
 
-	if errors.Is(err, pgx.ErrNoRows) {
-		http.Error(w, "usuario no encontrado", http.StatusNotFound)
-		return
-	}
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if isUniqueViolation(err) {
 			http.Error(w, "ese nombre de usuario ya está en uso", http.StatusConflict)
 			return
 		}
-		log.Printf("error actualizando usuario: %v", err)
-		http.Error(w, "error actualizando usuario", http.StatusInternalServerError)
+		queryError(w, err, "usuario no encontrado", "error actualizando usuario")
 		return
 	}
 
 	user.IsPrimary = (user.ID == primaryOwnerID)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(user)
+	writeJSON(w, http.StatusOK, user)
 }
 
 // GET /users
@@ -201,8 +179,7 @@ func (h *UserHandler) List(w http.ResponseWriter, r *http.Request) {
 		        (id = (SELECT id FROM users WHERE role = 'owner' ORDER BY created_at ASC LIMIT 1)) AS is_primary
 		 FROM users ORDER BY username`)
 	if err != nil {
-		log.Printf("error consultando usuarios: %v", err)
-		http.Error(w, "error consultando usuarios", http.StatusInternalServerError)
+		serverError(w, "error consultando usuarios", err)
 		return
 	}
 	defer rows.Close()
@@ -211,15 +188,13 @@ func (h *UserHandler) List(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var u models.User
 		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.AvatarURL, &u.CreatedBy, &u.CreatedAt, &u.IsPrimary); err != nil {
-			log.Printf("error leyendo usuarios: %v", err)
-			http.Error(w, "error leyendo usuarios", http.StatusInternalServerError)
+			serverError(w, "error leyendo usuarios", err)
 			return
 		}
 		users = append(users, u)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(users)
+	writeJSON(w, http.StatusOK, users)
 }
 
 type updateSelfRequest struct {
@@ -230,22 +205,14 @@ type updateSelfRequest struct {
 
 // PUT /users/me - Permite a cualquier usuario autenticado actualizar su propio nombre, contraseña y avatar
 func (h *UserHandler) UpdateSelf(w http.ResponseWriter, r *http.Request) {
-	userVal := r.Context().Value(custommw.ContextUserID)
-	if userVal == nil {
+	id := userIDFromContext(r.Context())
+	if id == uuid.Nil {
 		http.Error(w, "no autenticado", http.StatusUnauthorized)
 		return
 	}
 
-	var id uuid.UUID
-	if val, ok := userVal.(uuid.UUID); ok {
-		id = val
-	} else if valStr, ok := userVal.(string); ok {
-		id, _ = uuid.Parse(valStr)
-	}
-
 	var req updateSelfRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -265,8 +232,7 @@ func (h *UserHandler) UpdateSelf(w http.ResponseWriter, r *http.Request) {
 		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 		if err != nil {
-			log.Printf("error generando hash: %v", err)
-			http.Error(w, "error interno", http.StatusInternalServerError)
+			serverError(w, "error interno", err)
 			return
 		}
 
@@ -281,30 +247,22 @@ func (h *UserHandler) UpdateSelf(w http.ResponseWriter, r *http.Request) {
 		).Scan(&user.ID, &user.Username, &user.Role, &user.AvatarURL, &user.CreatedBy, &user.CreatedAt)
 	}
 
-	if errors.Is(queryErr, pgx.ErrNoRows) {
-		http.Error(w, "usuario no encontrado", http.StatusNotFound)
-		return
-	}
 	if queryErr != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(queryErr, &pgErr) && pgErr.Code == "23505" {
+		if isUniqueViolation(queryErr) {
 			http.Error(w, "ese nombre de usuario ya está en uso", http.StatusConflict)
 			return
 		}
-		log.Printf("error actualizando perfil: %v", queryErr)
-		http.Error(w, "error actualizando perfil", http.StatusInternalServerError)
+		queryError(w, queryErr, "usuario no encontrado", "error actualizando perfil")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(user)
+	writeJSON(w, http.StatusOK, user)
 }
 
 // DELETE /users/{id}
 func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		http.Error(w, "id de usuario inválido", http.StatusBadRequest)
+	id, ok := parseIDParam(w, r, "id de usuario inválido")
+	if !ok {
 		return
 	}
 
@@ -317,18 +275,9 @@ func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userVal := ctx.Value(custommw.ContextUserID)
-	if userVal != nil {
-		var currentID uuid.UUID
-		if val, ok := userVal.(uuid.UUID); ok {
-			currentID = val
-		} else if valStr, ok := userVal.(string); ok {
-			currentID, _ = uuid.Parse(valStr)
-		}
-		if id == currentID {
-			http.Error(w, "No puedes eliminar tu propio usuario activo", http.StatusBadRequest)
-			return
-		}
+	if currentID := userIDFromContext(ctx); currentID != uuid.Nil && id == currentID {
+		http.Error(w, "No puedes eliminar tu propio usuario activo", http.StatusBadRequest)
+		return
 	}
 
 	// Desvincular restricción NOT NULL de sales.sold_by antes de iniciar la transacción
@@ -345,8 +294,7 @@ func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := h.DB.Begin(ctx)
 	if err != nil {
-		log.Printf("error iniciando transacción de borrado de usuario: %v", err)
-		http.Error(w, "error interno", http.StatusInternalServerError)
+		serverError(w, "error interno", err)
 		return
 	}
 	defer tx.Rollback(ctx)
@@ -380,8 +328,7 @@ func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		log.Printf("error confirmando eliminación de usuario: %v", err)
-		http.Error(w, "error interno", http.StatusInternalServerError)
+		serverError(w, "error interno", err)
 		return
 	}
 

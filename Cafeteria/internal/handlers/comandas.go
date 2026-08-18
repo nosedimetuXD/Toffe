@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -10,13 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/NosedimetuXD/cafeteria/internal/events"
-	custommw "github.com/NosedimetuXD/cafeteria/internal/middleware"
 	"github.com/NosedimetuXD/cafeteria/internal/models"
 )
 
@@ -49,8 +46,7 @@ func (h *ComandaHandler) List(w http.ResponseWriter, r *http.Request) {
 		    WHEN 'cancelado' THEN 5 
 		    ELSE 6 END, c.created_at DESC`)
 	if err != nil {
-		log.Printf("error consultando comandas: %v", err)
-		http.Error(w, "error consultando comandas", http.StatusInternalServerError)
+		serverError(w, "error consultando comandas", err)
 		return
 	}
 	defer rows.Close()
@@ -59,8 +55,7 @@ func (h *ComandaHandler) List(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var c models.Comanda
 		if err := rows.Scan(&c.ID, &c.OrderNumber, &c.SaleID, &c.CustomerName, &c.Status, &c.Notes, &c.CreatedAt, &c.UpdatedAt, &c.ReadyAt, &c.PreparedBy, &c.PreparedByUsername); err != nil {
-			log.Printf("error leyendo comanda: %v", err)
-			http.Error(w, "error leyendo comanda", http.StatusInternalServerError)
+			serverError(w, "error leyendo comanda", err)
 			return
 		}
 		comandas = append(comandas, c)
@@ -86,8 +81,7 @@ func (h *ComandaHandler) List(w http.ResponseWriter, r *http.Request) {
 		itemRows.Close()
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(comandas)
+	writeJSON(w, http.StatusOK, comandas)
 }
 
 // PATCH /comandas/{id}/status
@@ -97,15 +91,13 @@ type updateComandaStatusRequest struct {
 }
 
 func (h *ComandaHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		http.Error(w, "id inválido", http.StatusBadRequest)
+	id, ok := parseIDParam(w, r)
+	if !ok {
 		return
 	}
 
 	var req updateComandaStatusRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -123,22 +115,13 @@ func (h *ComandaHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userIDVal := r.Context().Value(custommw.ContextUserID)
-
-	var userID *uuid.UUID
-	if idVal, ok := userIDVal.(uuid.UUID); ok {
-		userID = &idVal
-	} else if idStr, ok := userIDVal.(string); ok {
-		if parsed, pErr := uuid.Parse(idStr); pErr == nil {
-			userID = &parsed
-		}
-	}
+	userID := userIDFromContext(r.Context())
 
 	var preparedBy *uuid.UUID
 	var preparedByName string
-	if userID != nil {
+	if userID != uuid.Nil {
 		var validID uuid.UUID
-		errU := h.DB.QueryRow(r.Context(), "SELECT id, username FROM users WHERE id = $1", *userID).Scan(&validID, &preparedByName)
+		errU := h.DB.QueryRow(r.Context(), "SELECT id, username FROM users WHERE id = $1", userID).Scan(&validID, &preparedByName)
 		if errU == nil {
 			preparedBy = &validID
 		}
@@ -183,6 +166,5 @@ func (h *ComandaHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		"updated_at":   c.UpdatedAt,
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(c)
+	writeJSON(w, http.StatusOK, c)
 }

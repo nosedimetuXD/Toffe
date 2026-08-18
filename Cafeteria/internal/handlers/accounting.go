@@ -1,11 +1,9 @@
 package handlers
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -13,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/NosedimetuXD/cafeteria/internal/events"
-	custommw "github.com/NosedimetuXD/cafeteria/internal/middleware"
 	"github.com/NosedimetuXD/cafeteria/internal/models"
 )
 
@@ -28,62 +25,14 @@ func NewAccountingHandler(db *pgxpool.Pool, hub *events.Hub) *AccountingHandler 
 
 // GET /accounting/summary?period=today|week|month|all&start_date=...&end_date=...&year=...&month_num=...
 func (h *AccountingHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
-	period := r.URL.Query().Get("period")
-	startDate := strings.TrimSpace(r.URL.Query().Get("start_date"))
-	endDate := strings.TrimSpace(r.URL.Query().Get("end_date"))
-	yearParam := strings.TrimSpace(r.URL.Query().Get("year"))
-	monthParam := strings.TrimSpace(r.URL.Query().Get("month_num"))
-
-	var timeCondition string
-	var timeCondSales string
-	var timeCondComandas string
-
-	if startDate != "" && endDate != "" {
-		timeCondition = fmt.Sprintf("created_at >= '%s 00:00:00' AND created_at <= '%s 23:59:59'", startDate, endDate)
-		timeCondSales = fmt.Sprintf("s.created_at >= '%s 00:00:00' AND s.created_at <= '%s 23:59:59'", startDate, endDate)
-		timeCondComandas = fmt.Sprintf("c.created_at >= '%s 00:00:00' AND c.created_at <= '%s 23:59:59'", startDate, endDate)
-	} else if yearParam != "" && monthParam != "" {
-		y, _ := strconv.Atoi(yearParam)
-		m, _ := strconv.Atoi(monthParam)
-		if y > 2000 && m >= 1 && m <= 12 {
-			timeCondition = fmt.Sprintf("EXTRACT(YEAR FROM created_at) = %d AND EXTRACT(MONTH FROM created_at) = %d", y, m)
-			timeCondSales = fmt.Sprintf("EXTRACT(YEAR FROM s.created_at) = %d AND EXTRACT(MONTH FROM s.created_at) = %d", y, m)
-			timeCondComandas = fmt.Sprintf("EXTRACT(YEAR FROM c.created_at) = %d AND EXTRACT(MONTH FROM c.created_at) = %d", y, m)
-		}
-	}
-
-	if timeCondition == "" {
-		switch period {
-		case "today":
-			timeCondition = "(created_at AT TIME ZONE 'America/Bogota')::date = (now() AT TIME ZONE 'America/Bogota')::date"
-			timeCondSales = "(s.created_at AT TIME ZONE 'America/Bogota')::date = (now() AT TIME ZONE 'America/Bogota')::date"
-			timeCondComandas = "(c.created_at AT TIME ZONE 'America/Bogota')::date = (now() AT TIME ZONE 'America/Bogota')::date"
-		case "week":
-			timeCondition = "created_at >= (now() - INTERVAL '7 days')"
-			timeCondSales = "s.created_at >= (now() - INTERVAL '7 days')"
-			timeCondComandas = "c.created_at >= (now() - INTERVAL '7 days')"
-		case "month":
-			timeCondition = "created_at >= date_trunc('month', now())"
-			timeCondSales = "s.created_at >= date_trunc('month', now())"
-			timeCondComandas = "c.created_at >= date_trunc('month', now())"
-		case "prev_month":
-			timeCondition = "created_at >= date_trunc('month', now() - INTERVAL '1 month') AND created_at < date_trunc('month', now())"
-			timeCondSales = "s.created_at >= date_trunc('month', now() - INTERVAL '1 month') AND s.created_at < date_trunc('month', now())"
-			timeCondComandas = "c.created_at >= date_trunc('month', now() - INTERVAL '1 month') AND c.created_at < date_trunc('month', now())"
-		case "year":
-			timeCondition = "created_at >= date_trunc('year', now())"
-			timeCondSales = "s.created_at >= date_trunc('year', now())"
-			timeCondComandas = "c.created_at >= date_trunc('year', now())"
-		default: // "all"
-			timeCondition = "1=1"
-			timeCondSales = "1=1"
-			timeCondComandas = "1=1"
-		}
-	}
+	filter := parseTimeFilter(r)
+	timeCondition := filter.Condition("")
+	timeCondSales := filter.Condition("s.")
+	timeCondComandas := filter.Condition("c.")
 
 	summary := models.AccountingSummary{
 		IncomeByPaymentMethod: make(map[string]float64),
-		ExpensesByCategory:   make(map[string]float64),
+		ExpensesByCategory:    make(map[string]float64),
 	}
 
 	// 1. Ingresos totales de ventas
@@ -91,8 +40,7 @@ func (h *AccountingHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 	salesQuery := "SELECT COALESCE(SUM(total), 0), COUNT(id), COALESCE(SUM(cash_amount), 0), COALESCE(SUM(transfer_amount), 0) FROM sales WHERE " + timeCondition
 	err := h.DB.QueryRow(r.Context(), salesQuery).Scan(&summary.TotalIncome, &summary.SalesCount, &cashIncome, &transferIncome)
 	if err != nil {
-		log.Printf("error calculando ingresos: %v", err)
-		http.Error(w, "error calculando ingresos", http.StatusInternalServerError)
+		serverError(w, "error calculando ingresos", err)
 		return
 	}
 	summary.IncomeByPaymentMethod["efectivo"] = cashIncome
@@ -102,8 +50,7 @@ func (h *AccountingHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 	expensesQuery := "SELECT COALESCE(SUM(amount), 0), COUNT(id) FROM expenses WHERE " + timeCondition
 	err = h.DB.QueryRow(r.Context(), expensesQuery).Scan(&summary.TotalExpenses, &summary.ExpensesCount)
 	if err != nil {
-		log.Printf("error calculando gastos: %v", err)
-		http.Error(w, "error calculando gastos", http.StatusInternalServerError)
+		serverError(w, "error calculando gastos", err)
 		return
 	}
 
@@ -124,15 +71,7 @@ func (h *AccountingHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 	summary.NetBalance = summary.TotalIncome - summary.TotalExpenses
 
 	// 4. Estadísticas Ejecutivas (exclusivas para dueño)
-	roleVal := r.Context().Value(custommw.ContextRole)
-	var userRole models.UserRole
-	if r, ok := roleVal.(models.UserRole); ok {
-		userRole = r
-	} else if rStr, ok := roleVal.(string); ok {
-		userRole = models.UserRole(rStr)
-	}
-
-	if userRole == models.RoleOwner {
+	if userRoleFromContext(r.Context()) == models.RoleOwner {
 		mStats := &models.MonthlyStats{
 			TopCustomers: []models.CustomerStat{},
 			TopProducts:  []models.TopProductStat{},
@@ -239,8 +178,7 @@ func (h *AccountingHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 		summary.MonthlyStats = mStats
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(summary)
+	writeJSON(w, http.StatusOK, summary)
 }
 
 // GET /expenses?period=today|week|month|all
@@ -269,8 +207,7 @@ func (h *AccountingHandler) ListExpenses(w http.ResponseWriter, r *http.Request)
 
 	rows, err := h.DB.Query(r.Context(), query)
 	if err != nil {
-		log.Printf("error consultando gastos: %v", err)
-		http.Error(w, "error consultando gastos", http.StatusInternalServerError)
+		serverError(w, "error consultando gastos", err)
 		return
 	}
 	defer rows.Close()
@@ -280,15 +217,13 @@ func (h *AccountingHandler) ListExpenses(w http.ResponseWriter, r *http.Request)
 		var e models.Expense
 		if err := rows.Scan(&e.ID, &e.Description, &e.Amount, &e.Category, &e.PaymentMethod,
 			&e.RegisteredBy, &e.RegistererName, &e.IngredientID, &e.IngredientName, &e.QuantityAdded, &e.CreatedAt); err != nil {
-			log.Printf("error leyendo gastos: %v", err)
-			http.Error(w, "error leyendo gastos", http.StatusInternalServerError)
+			serverError(w, "error leyendo gastos", err)
 			return
 		}
 		expenses = append(expenses, e)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(expenses)
+	writeJSON(w, http.StatusOK, expenses)
 }
 
 // POST /expenses — si se especifica un ingredient_id y quantity_added > 0, reabastece el inventario
@@ -303,8 +238,7 @@ type createExpenseRequest struct {
 
 func (h *AccountingHandler) CreateExpense(w http.ResponseWriter, r *http.Request) {
 	var req createExpenseRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "cuerpo inválido", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -325,20 +259,11 @@ func (h *AccountingHandler) CreateExpense(w http.ResponseWriter, r *http.Request
 	}
 
 	ctx := r.Context()
-	userVal := ctx.Value(custommw.ContextUserID)
-	var registeredBy uuid.UUID
-	if userVal != nil {
-		if id, ok := userVal.(uuid.UUID); ok {
-			registeredBy = id
-		} else if idStr, ok := userVal.(string); ok {
-			registeredBy, _ = uuid.Parse(idStr)
-		}
-	}
+	registeredBy := userIDFromContext(ctx)
 
 	tx, err := h.DB.Begin(ctx)
 	if err != nil {
-		log.Printf("error iniciando transacción: %v", err)
-		http.Error(w, "error interno", http.StatusInternalServerError)
+		serverError(w, "error interno", err)
 		return
 	}
 	defer tx.Rollback(ctx)
@@ -349,8 +274,7 @@ func (h *AccountingHandler) CreateExpense(w http.ResponseWriter, r *http.Request
 			`UPDATE ingredients SET quantity = quantity + $1, updated_at = now() WHERE id = $2`,
 			req.QuantityAdded, *req.IngredientID)
 		if err != nil {
-			log.Printf("error reabasteciendo inventario: %v", err)
-			http.Error(w, "error reabasteciendo insumo", http.StatusInternalServerError)
+			serverError(w, "error reabasteciendo insumo", err)
 			return
 		}
 		if tag.RowsAffected() == 0 {
@@ -368,14 +292,12 @@ func (h *AccountingHandler) CreateExpense(w http.ResponseWriter, r *http.Request
 		desc, req.Amount, category, paymentMethod, registeredBy, req.IngredientID, req.QuantityAdded,
 	).Scan(&expID, &createdAt)
 	if err != nil {
-		log.Printf("error creando gasto: %v", err)
-		http.Error(w, "error registrando gasto", http.StatusInternalServerError)
+		serverError(w, "error registrando gasto", err)
 		return
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		log.Printf("error confirmando transacción de gasto: %v", err)
-		http.Error(w, "error interno", http.StatusInternalServerError)
+		serverError(w, "error interno", err)
 		return
 	}
 
@@ -393,9 +315,7 @@ func (h *AccountingHandler) CreateExpense(w http.ResponseWriter, r *http.Request
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"id":         expID,
 		"created_at": createdAt,
 	})
