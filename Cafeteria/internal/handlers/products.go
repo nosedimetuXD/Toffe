@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -168,7 +167,7 @@ func (h *ProductHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	tag, err := h.DB.Exec(r.Context(), `DELETE FROM products WHERE id = $1`, id)
 	if err != nil {
 		log.Printf("error borrando producto %s: %v", id, err)
-		http.Error(w, fmt.Sprintf("Error borrando producto: %v", err), http.StatusInternalServerError)
+		http.Error(w, "error borrando producto", http.StatusInternalServerError)
 		return
 	}
 	if tag.RowsAffected() == 0 {
