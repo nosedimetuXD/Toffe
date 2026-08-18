@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from 'react'
-import { api } from '../api/client'
+import { api, loadAllSettled } from '../api/client'
 import Modal from '../components/Modal'
 import { AVAILABLE_UNITS, convertQuantity, formatConvertedHint } from '../utils/unitConverter'
 import {
@@ -68,16 +68,19 @@ export default function Accounting() {
     setLoading(true)
     setPageError('')
     try {
-      const [expData, ingData, salesData, wasteData] = await Promise.all([
-        api.get('/expenses?period=all').catch(() => []),
-        api.get('/ingredients').catch(() => []),
-        api.get('/sales?period=all').catch(() => []),
-        api.get('/waste').catch(() => [])
-      ])
-      setExpenses(Array.isArray(expData) ? expData : [])
-      setIngredients(Array.isArray(ingData) ? ingData : [])
-      setSales(Array.isArray(salesData) ? salesData : [])
-      setWasteReports(Array.isArray(wasteData) ? wasteData : [])
+      const { data, failed } = await loadAllSettled({
+        gastos: api.get('/expenses?period=all'),
+        insumos: api.get('/ingredients'),
+        ventas: api.get('/sales?period=all'),
+        desperdicios: api.get('/waste')
+      })
+      setExpenses(Array.isArray(data.gastos) ? data.gastos : [])
+      setIngredients(Array.isArray(data.insumos) ? data.insumos : [])
+      setSales(Array.isArray(data.ventas) ? data.ventas : [])
+      setWasteReports(Array.isArray(data.desperdicios) ? data.desperdicios : [])
+      if (failed.length > 0) {
+        setPageError(`No se pudieron cargar: ${failed.join(', ')} — los totales pueden estar incompletos`)
+      }
     } catch (err) {
       console.error('Error cargando contabilidad:', err)
       setPageError('No se pudo cargar la información de contabilidad')

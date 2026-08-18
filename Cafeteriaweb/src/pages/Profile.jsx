@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useAuth } from '../context/AuthContext'
-import { api } from '../api/client'
+import { api, loadAllSettled } from '../api/client'
 import Modal from '../components/Modal'
 import { processImageUrl, compressAndReadFile } from '../utils/imageUtils'
 import {
@@ -39,21 +39,24 @@ export default function Profile() {
   const [userSales, setUserSales] = useState([])
   const [userComandas, setUserComandas] = useState([])
   const [loadingStats, setLoadingStats] = useState(true)
+  const [statsError, setStatsError] = useState('')
 
   useEffect(() => {
     async function fetchUserData() {
       try {
-        const [sales, comandas] = await Promise.all([
-          api.get('/sales?period=all').catch(() => []),
-          api.get('/comandas').catch(() => [])
-        ])
-        const mySales = (sales || []).filter(
+        const { data, failed } = await loadAllSettled({
+          ventas: api.get('/sales?period=all'),
+          comandas: api.get('/comandas')
+        })
+        const mySales = (data.ventas || []).filter(
           (s) => (user?.id && s.sold_by === user.id) || s.sold_by_username?.toLowerCase() === user?.username?.toLowerCase()
         )
         setUserSales(mySales)
-        setUserComandas(comandas || [])
+        setUserComandas(data.comandas || [])
+        setStatsError(failed.length > 0 ? `No se pudieron cargar: ${failed.join(', ')}` : '')
       } catch (e) {
         console.error('Error cargando datos del usuario', e)
+        setStatsError('No se pudieron cargar tus métricas')
       } finally {
         setLoadingStats(false)
       }
@@ -78,7 +81,12 @@ export default function Profile() {
     userSales.forEach((s) => {
       let items = s.items
       if (typeof items === 'string') {
-        try { items = JSON.parse(items) } catch (e) { items = [] }
+        try {
+          items = JSON.parse(items)
+        } catch (e) {
+          console.error('venta con items en formato inválido:', e)
+          items = []
+        }
       }
       (items || []).forEach((it) => {
         const name = it.product_name || it.ProductName || it.name || 'Producto'
@@ -283,6 +291,8 @@ export default function Profile() {
 
             {loadingStats ? (
               <p className="text-xs font-semibold text-[#9F6839] py-4 text-center">Cargando tus métricas...</p>
+            ) : statsError ? (
+              <p className="text-xs font-semibold text-red-600 py-4 text-center">{statsError}</p>
             ) : (
               <div className="grid grid-cols-2 gap-3">
                 <div className="p-3.5 rounded-2xl bg-[#FEE4D7]/40 dark:bg-[#2A150C] border border-[#D4B28E]/60 space-y-1">

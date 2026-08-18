@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/NosedimetuXD/cafeteria/internal/events"
@@ -32,7 +33,16 @@ func (h *EventHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case event := <-ch:
-			w.Write(event.ToSSE())
+			payload, err := event.ToSSE()
+			if err != nil {
+				// un evento corrupto no debe cortar el stream del resto
+				log.Printf("error serializando evento SSE: %v", err)
+				continue
+			}
+			if _, err := w.Write(payload); err != nil {
+				log.Printf("error escribiendo evento SSE, se cierra el stream: %v", err)
+				return
+			}
 			flusher.Flush()
 		case <-r.Context().Done():
 			// el cliente cerró la conexión (cerró la pestaña, perdió señal, etc.)

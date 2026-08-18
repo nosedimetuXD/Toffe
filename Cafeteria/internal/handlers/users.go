@@ -17,7 +17,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
-	custommw "github.com/NosedimetuXD/cafeteria/internal/middleware"
 	"github.com/NosedimetuXD/cafeteria/internal/models"
 )
 
@@ -29,7 +28,7 @@ func NewUserHandler(db *pgxpool.Pool) *UserHandler {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, _ = db.Exec(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT ''`)
+	execSchema(ctx, db, "users.avatar_url", `ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT ''`)
 
 	return &UserHandler{DB: db}
 }
@@ -73,12 +72,19 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	createdBy, err := userIDFromContext(r.Context())
+	if err != nil {
+		log.Printf("no se pudo identificar al usuario creador: %v", err)
+		http.Error(w, "no autenticado", http.StatusUnauthorized)
+		return
+	}
+
 	var user models.User
 	err = h.DB.QueryRow(r.Context(),
 		`INSERT INTO users (username, password_hash, role, avatar_url, created_by)
 		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, username, role, COALESCE(avatar_url, ''), created_by, created_at`,
-		req.Username, string(hash), req.Role, req.AvatarURL, r.Context().Value(custommw.ContextUserID),
+		req.Username, string(hash), req.Role, req.AvatarURL, createdBy,
 	).Scan(&user.ID, &user.Username, &user.Role, &user.AvatarURL, &user.CreatedBy, &user.CreatedAt)
 
 	if err != nil {
@@ -92,9 +98,7 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(user)
+	writeJSON(w, http.StatusCreated, user)
 }
 
 type updateUserRequest struct {
@@ -132,8 +136,12 @@ func (h *UserHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var primaryOwnerID uuid.UUID
-	_ = h.DB.QueryRow(r.Context(), `SELECT id FROM users WHERE role = 'owner' ORDER BY created_at ASC LIMIT 1`).Scan(&primaryOwnerID)
+	primaryOwnerID, err := h.primaryOwnerID(r.Context())
+	if err != nil {
+		log.Printf("error consultando dueño principal: %v", err)
+		http.Error(w, "error interno", http.StatusInternalServerError)
+		return
+	}
 
 	if id == primaryOwnerID && req.Role != models.RoleOwner {
 		http.Error(w, "El rol del dueño principal está protegido y no se puede modificar", http.StatusForbidden)
@@ -188,13 +196,12 @@ func (h *UserHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	user.IsPrimary = (user.ID == primaryOwnerID)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(user)
+	writeJSON(w, http.StatusOK, user)
 }
 
 // GET /users
 func (h *UserHandler) List(w http.ResponseWriter, r *http.Request) {
-	_, _ = h.DB.Exec(r.Context(), `ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT ''`)
+	execSchema(r.Context(), h.DB, "users.avatar_url", `ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT ''`)
 
 	rows, err := h.DB.Query(r.Context(),
 		`SELECT id, username, role, COALESCE(avatar_url, ''), created_by, created_at,
@@ -217,9 +224,13 @@ func (h *UserHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		users = append(users, u)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("error recorriendo usuarios: %v", err)
+		http.Error(w, "error leyendo usuarios", http.StatusInternalServerError)
+		return
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(users)
+	writeJSON(w, http.StatusOK, users)
 }
 
 type updateSelfRequest struct {
@@ -230,17 +241,11 @@ type updateSelfRequest struct {
 
 // PUT /users/me - Permite a cualquier usuario autenticado actualizar su propio nombre, contraseña y avatar
 func (h *UserHandler) UpdateSelf(w http.ResponseWriter, r *http.Request) {
-	userVal := r.Context().Value(custommw.ContextUserID)
-	if userVal == nil {
+	id, err := userIDFromContext(r.Context())
+	if err != nil {
+		log.Printf("no se pudo identificar al usuario autenticado: %v", err)
 		http.Error(w, "no autenticado", http.StatusUnauthorized)
 		return
-	}
-
-	var id uuid.UUID
-	if val, ok := userVal.(uuid.UUID); ok {
-		id = val
-	} else if valStr, ok := userVal.(string); ok {
-		id, _ = uuid.Parse(valStr)
 	}
 
 	var req updateSelfRequest
@@ -263,9 +268,9 @@ func (h *UserHandler) UpdateSelf(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "la contraseña debe tener al menos 8 caracteres", http.StatusBadRequest)
 			return
 		}
-		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-		if err != nil {
-			log.Printf("error generando hash: %v", err)
+		hash, hashErr := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		if hashErr != nil {
+			log.Printf("error generando hash: %v", hashErr)
 			http.Error(w, "error interno", http.StatusInternalServerError)
 			return
 		}
@@ -296,8 +301,21 @@ func (h *UserHandler) UpdateSelf(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(user)
+	writeJSON(w, http.StatusOK, user)
+}
+
+// primaryOwnerID devuelve el dueño principal (el owner más antiguo). Devuelve
+// uuid.Nil sin error cuando todavía no existe ningún owner.
+func (h *UserHandler) primaryOwnerID(ctx context.Context) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := h.DB.QueryRow(ctx, `SELECT id FROM users WHERE role = 'owner' ORDER BY created_at ASC LIMIT 1`).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, nil
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return id, nil
 }
 
 // DELETE /users/{id}
@@ -309,31 +327,37 @@ func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	var primaryOwnerID uuid.UUID
-	_ = h.DB.QueryRow(ctx, `SELECT id FROM users WHERE role = 'owner' ORDER BY created_at ASC LIMIT 1`).Scan(&primaryOwnerID)
+	primaryOwnerID, err := h.primaryOwnerID(ctx)
+	if err != nil {
+		log.Printf("error consultando dueño principal: %v", err)
+		http.Error(w, "error interno", http.StatusInternalServerError)
+		return
+	}
+	if primaryOwnerID == uuid.Nil {
+		// Sin dueño principal no hay a quién reasignar el historial del usuario borrado
+		http.Error(w, "no existe un dueño principal al que reasignar el historial", http.StatusConflict)
+		return
+	}
 
 	if id == primaryOwnerID {
 		http.Error(w, "El dueño principal está protegido permanentemente y no se puede eliminar", http.StatusForbidden)
 		return
 	}
 
-	userVal := ctx.Value(custommw.ContextUserID)
-	if userVal != nil {
-		var currentID uuid.UUID
-		if val, ok := userVal.(uuid.UUID); ok {
-			currentID = val
-		} else if valStr, ok := userVal.(string); ok {
-			currentID, _ = uuid.Parse(valStr)
-		}
-		if id == currentID {
-			http.Error(w, "No puedes eliminar tu propio usuario activo", http.StatusBadRequest)
-			return
-		}
+	currentID, err := userIDFromContext(ctx)
+	if err != nil {
+		log.Printf("no se pudo identificar al usuario autenticado: %v", err)
+		http.Error(w, "no autenticado", http.StatusUnauthorized)
+		return
+	}
+	if id == currentID {
+		http.Error(w, "No puedes eliminar tu propio usuario activo", http.StatusBadRequest)
+		return
 	}
 
 	// Desvincular restricción NOT NULL de sales.sold_by antes de iniciar la transacción
-	_, _ = h.DB.Exec(ctx, `ALTER TABLE sales ALTER COLUMN sold_by DROP NOT NULL`)
-	_, _ = h.DB.Exec(ctx, `
+	execSchema(ctx, h.DB, "sales.sold_by nullable", `ALTER TABLE sales ALTER COLUMN sold_by DROP NOT NULL`)
+	execSchema(ctx, h.DB, "clave foránea sales.sold_by", `
 		DO $$ 
 		BEGIN 
 			IF EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name = 'sales_sold_by_fkey') THEN
@@ -351,27 +375,31 @@ func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(ctx)
 
-	if _, err := tx.Exec(ctx, `UPDATE sales SET sold_by = NULL WHERE sold_by = $1`, id); err != nil {
-		log.Printf("aviso actualizando sales: %v", err)
-		_, _ = tx.Exec(ctx, `UPDATE sales SET sold_by = $2 WHERE sold_by = $1`, id, primaryOwnerID)
+	// El historial contable se preserva reasignándolo antes de borrar el usuario. Si
+	// alguna reasignación falla la transacción queda abortada, así que se corta aquí.
+	reassignments := []struct {
+		desc string
+		sql  string
+		args []any
+	}{
+		{"ventas", `UPDATE sales SET sold_by = NULL WHERE sold_by = $1`, []any{id}},
+		{"gastos", `UPDATE expenses SET registered_by = $2 WHERE registered_by = $1`, []any{id, primaryOwnerID}},
+		{"tareas asignadas", `UPDATE tasks SET assigned_to = NULL WHERE assigned_to = $1`, []any{id}},
+		{"tareas creadas", `UPDATE tasks SET created_by = $2 WHERE created_by = $1`, []any{id, primaryOwnerID}},
+		{"usuarios creados", `UPDATE users SET created_by = $2 WHERE created_by = $1`, []any{id, primaryOwnerID}},
 	}
-	if _, err := tx.Exec(ctx, `UPDATE expenses SET registered_by = $2 WHERE registered_by = $1`, id, primaryOwnerID); err != nil {
-		log.Printf("aviso actualizando expenses: %v", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE tasks SET assigned_to = NULL WHERE assigned_to = $1`, id); err != nil {
-		log.Printf("aviso actualizando tasks assigned_to: %v", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE tasks SET created_by = $2 WHERE created_by = $1`, id, primaryOwnerID); err != nil {
-		log.Printf("aviso actualizando tasks created_by: %v", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE users SET created_by = $2 WHERE created_by = $1`, id, primaryOwnerID); err != nil {
-		log.Printf("aviso actualizando users created_by: %v", err)
+	for _, step := range reassignments {
+		if _, err := tx.Exec(ctx, step.sql, step.args...); err != nil {
+			log.Printf("error reasignando %s del usuario %s: %v", step.desc, id, err)
+			http.Error(w, fmt.Sprintf("no se pudo reasignar el historial de %s", step.desc), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	tag, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
 	if err != nil {
 		log.Printf("error eliminando usuario: %v", err)
-		http.Error(w, fmt.Sprintf("no se pudo eliminar el usuario: %v", err), http.StatusBadRequest)
+		http.Error(w, "no se pudo eliminar el usuario", http.StatusInternalServerError)
 		return
 	}
 	if tag.RowsAffected() == 0 {

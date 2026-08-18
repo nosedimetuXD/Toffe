@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,10 +11,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/NosedimetuXD/cafeteria/internal/events"
-	custommw "github.com/NosedimetuXD/cafeteria/internal/middleware"
 	"github.com/NosedimetuXD/cafeteria/internal/models"
 )
 
@@ -26,7 +27,7 @@ func NewWasteHandler(db *pgxpool.Pool, hub *events.Hub) *WasteHandler {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, _ = db.Exec(ctx, `
+	execSchema(ctx, db, "tabla waste_reports", `
 		CREATE TABLE IF NOT EXISTS waste_reports (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			ingredient_id UUID NOT NULL REFERENCES ingredients(id) ON DELETE CASCADE,
@@ -38,16 +39,16 @@ func NewWasteHandler(db *pgxpool.Pool, hub *events.Hub) *WasteHandler {
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 		)
 	`)
-	_, _ = db.Exec(ctx, `ALTER TABLE waste_reports ADD COLUMN IF NOT EXISTS unit_cost NUMERIC DEFAULT 0`)
-	_, _ = db.Exec(ctx, `ALTER TABLE waste_reports ADD COLUMN IF NOT EXISTS estimated_loss NUMERIC DEFAULT 0`)
+	execSchema(ctx, db, "waste_reports.unit_cost", `ALTER TABLE waste_reports ADD COLUMN IF NOT EXISTS unit_cost NUMERIC DEFAULT 0`)
+	execSchema(ctx, db, "waste_reports.estimated_loss", `ALTER TABLE waste_reports ADD COLUMN IF NOT EXISTS estimated_loss NUMERIC DEFAULT 0`)
 
 	return &WasteHandler{DB: db, Hub: hub}
 }
 
 // GET /waste — lista todos los reportes de mermas/daños
 func (h *WasteHandler) List(w http.ResponseWriter, r *http.Request) {
-	_, _ = h.DB.Exec(r.Context(), `ALTER TABLE waste_reports ADD COLUMN IF NOT EXISTS unit_cost NUMERIC DEFAULT 0`)
-	_, _ = h.DB.Exec(r.Context(), `ALTER TABLE waste_reports ADD COLUMN IF NOT EXISTS estimated_loss NUMERIC DEFAULT 0`)
+	execSchema(r.Context(), h.DB, "waste_reports.unit_cost", `ALTER TABLE waste_reports ADD COLUMN IF NOT EXISTS unit_cost NUMERIC DEFAULT 0`)
+	execSchema(r.Context(), h.DB, "waste_reports.estimated_loss", `ALTER TABLE waste_reports ADD COLUMN IF NOT EXISTS estimated_loss NUMERIC DEFAULT 0`)
 
 	query := `SELECT w.id, w.ingredient_id, COALESCE(i.name, 'Insumo Eliminado'), COALESCE(i.unit, 'unidades'), 
 	                 w.quantity_lost, COALESCE(w.unit_cost, 0), COALESCE(w.estimated_loss, 0), w.reason, w.reported_by, COALESCE(u.username, 'Personal'), w.created_at
@@ -75,9 +76,13 @@ func (h *WasteHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		list = append(list, item)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("error recorriendo mermas: %v", err)
+		http.Error(w, "error leyendo reporte de daños", http.StatusInternalServerError)
+		return
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(list)
+	writeJSON(w, http.StatusOK, list)
 }
 
 // POST /waste — registra daño/pérdida de insumo y descuenta la cantidad del inventario
@@ -101,18 +106,23 @@ func (h *WasteHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	userVal := ctx.Value(custommw.ContextUserID)
-	var reportedBy uuid.UUID
-	if userVal != nil {
-		if id, ok := userVal.(uuid.UUID); ok {
-			reportedBy = id
-		} else if idStr, ok := userVal.(string); ok {
-			reportedBy, _ = uuid.Parse(idStr)
-		}
+	reportedBy, err := userIDFromContext(ctx)
+	if err != nil {
+		log.Printf("no se pudo identificar a quien reporta la merma: %v", err)
+		http.Error(w, "no autenticado", http.StatusUnauthorized)
+		return
 	}
 
 	var unitCost float64
-	_ = h.DB.QueryRow(ctx, `SELECT COALESCE(unit_cost, 0) FROM ingredients WHERE id = $1`, req.IngredientID).Scan(&unitCost)
+	if err := h.DB.QueryRow(ctx, `SELECT COALESCE(unit_cost, 0) FROM ingredients WHERE id = $1`, req.IngredientID).Scan(&unitCost); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "el insumo especificado no existe", http.StatusBadRequest)
+			return
+		}
+		log.Printf("error consultando el costo unitario del insumo %s: %v", req.IngredientID, err)
+		http.Error(w, "error interno", http.StatusInternalServerError)
+		return
+	}
 
 	estimatedLoss := req.QuantityLost * unitCost
 
@@ -166,9 +176,7 @@ func (h *WasteHandler) Create(w http.ResponseWriter, r *http.Request) {
 		"reason":         reason,
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"id":             wasteID,
 		"unit_cost":      unitCost,
 		"estimated_loss": estimatedLoss,

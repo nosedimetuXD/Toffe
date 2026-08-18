@@ -6,7 +6,14 @@ const AuthContext = createContext(null)
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => {
     const saved = localStorage.getItem('user')
-    return saved ? JSON.parse(saved) : null
+    if (!saved) return null
+    try {
+      return JSON.parse(saved)
+    } catch (e) {
+      console.error('usuario guardado corrupto, se descarta la sesión local:', e)
+      localStorage.removeItem('user')
+      return null
+    }
   })
 
   // Sincronización automática de perfil con PostgreSQL en cada carga de app
@@ -27,7 +34,7 @@ export function AuthProvider({ children }) {
           }
         }
       } catch (e) {
-        // Token expirado o fallo de red
+        console.error('no se pudo sincronizar el perfil del usuario:', e)
       }
     }
 

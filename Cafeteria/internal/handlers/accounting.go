@@ -2,14 +2,15 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/NosedimetuXD/cafeteria/internal/events"
@@ -39,17 +40,23 @@ func (h *AccountingHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 	var timeCondComandas string
 
 	if startDate != "" && endDate != "" {
-		timeCondition = fmt.Sprintf("created_at >= '%s 00:00:00' AND created_at <= '%s 23:59:59'", startDate, endDate)
-		timeCondSales = fmt.Sprintf("s.created_at >= '%s 00:00:00' AND s.created_at <= '%s 23:59:59'", startDate, endDate)
-		timeCondComandas = fmt.Sprintf("c.created_at >= '%s 00:00:00' AND c.created_at <= '%s 23:59:59'", startDate, endDate)
-	} else if yearParam != "" && monthParam != "" {
-		y, _ := strconv.Atoi(yearParam)
-		m, _ := strconv.Atoi(monthParam)
-		if y > 2000 && m >= 1 && m <= 12 {
-			timeCondition = fmt.Sprintf("EXTRACT(YEAR FROM created_at) = %d AND EXTRACT(MONTH FROM created_at) = %d", y, m)
-			timeCondSales = fmt.Sprintf("EXTRACT(YEAR FROM s.created_at) = %d AND EXTRACT(MONTH FROM s.created_at) = %d", y, m)
-			timeCondComandas = fmt.Sprintf("EXTRACT(YEAR FROM c.created_at) = %d AND EXTRACT(MONTH FROM c.created_at) = %d", y, m)
+		start, end, err := parseDateRange(startDate, endDate)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
+		timeCondition = fmt.Sprintf("created_at >= '%s 00:00:00' AND created_at <= '%s 23:59:59'", start, end)
+		timeCondSales = fmt.Sprintf("s.created_at >= '%s 00:00:00' AND s.created_at <= '%s 23:59:59'", start, end)
+		timeCondComandas = fmt.Sprintf("c.created_at >= '%s 00:00:00' AND c.created_at <= '%s 23:59:59'", start, end)
+	} else if yearParam != "" && monthParam != "" {
+		y, m, err := parseYearMonth(yearParam, monthParam)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		timeCondition = fmt.Sprintf("EXTRACT(YEAR FROM created_at) = %d AND EXTRACT(MONTH FROM created_at) = %d", y, m)
+		timeCondSales = fmt.Sprintf("EXTRACT(YEAR FROM s.created_at) = %d AND EXTRACT(MONTH FROM s.created_at) = %d", y, m)
+		timeCondComandas = fmt.Sprintf("EXTRACT(YEAR FROM c.created_at) = %d AND EXTRACT(MONTH FROM c.created_at) = %d", y, m)
 	}
 
 	if timeCondition == "" {
@@ -83,7 +90,7 @@ func (h *AccountingHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 
 	summary := models.AccountingSummary{
 		IncomeByPaymentMethod: make(map[string]float64),
-		ExpensesByCategory:   make(map[string]float64),
+		ExpensesByCategory:    make(map[string]float64),
 	}
 
 	// 1. Ingresos totales de ventas
@@ -110,15 +117,27 @@ func (h *AccountingHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 	// 3. Gastos por categoría
 	catQuery := "SELECT category, COALESCE(SUM(amount), 0) FROM expenses WHERE " + timeCondition + " GROUP BY category"
 	rows, err := h.DB.Query(r.Context(), catQuery)
-	if err == nil {
+	if err != nil {
+		log.Printf("error calculando gastos por categoría: %v", err)
+		http.Error(w, "error calculando gastos por categoría", http.StatusInternalServerError)
+		return
+	}
+	catErr := func() error {
+		defer rows.Close()
 		for rows.Next() {
 			var cat string
 			var amount float64
-			if err := rows.Scan(&cat, &amount); err == nil {
-				summary.ExpensesByCategory[cat] = amount
+			if err := rows.Scan(&cat, &amount); err != nil {
+				return err
 			}
+			summary.ExpensesByCategory[cat] = amount
 		}
-		rows.Close()
+		return rows.Err()
+	}()
+	if catErr != nil {
+		log.Printf("error leyendo gastos por categoría: %v", catErr)
+		http.Error(w, "error calculando gastos por categoría", http.StatusInternalServerError)
+		return
 	}
 
 	summary.NetBalance = summary.TotalIncome - summary.TotalExpenses
@@ -140,18 +159,30 @@ func (h *AccountingHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Ventas del período
-		_ = h.DB.QueryRow(r.Context(),
-			"SELECT COALESCE(SUM(total), 0) FROM sales WHERE "+timeCondition).Scan(&mStats.MonthlyIncome)
+		if err := h.DB.QueryRow(r.Context(),
+			"SELECT COALESCE(SUM(total), 0) FROM sales WHERE "+timeCondition).Scan(&mStats.MonthlyIncome); err != nil {
+			log.Printf("error calculando ingresos del período: %v", err)
+			http.Error(w, "error calculando estadísticas", http.StatusInternalServerError)
+			return
+		}
 
 		// Gastos del período
-		_ = h.DB.QueryRow(r.Context(),
-			"SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE "+timeCondition).Scan(&mStats.MonthlyExpenses)
+		if err := h.DB.QueryRow(r.Context(),
+			"SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE "+timeCondition).Scan(&mStats.MonthlyExpenses); err != nil {
+			log.Printf("error calculando gastos del período: %v", err)
+			http.Error(w, "error calculando estadísticas", http.StatusInternalServerError)
+			return
+		}
 
 		mStats.NetProfit = mStats.MonthlyIncome - mStats.MonthlyExpenses
 
 		// Tiempo Promedio de Salida de Comandas en minutos
-		_ = h.DB.QueryRow(r.Context(),
-			"SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (COALESCE(c.ready_at, c.updated_at) - c.created_at))/60), 0) FROM comandas c WHERE c.status IN ('listo', 'entregado') AND "+timeCondComandas).Scan(&mStats.AvgPrepTimeMinutes)
+		if err := h.DB.QueryRow(r.Context(),
+			"SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (COALESCE(c.ready_at, c.updated_at) - c.created_at))/60), 0) FROM comandas c WHERE c.status IN ('listo', 'entregado') AND "+timeCondComandas).Scan(&mStats.AvgPrepTimeMinutes); err != nil {
+			log.Printf("error calculando el tiempo promedio de preparación: %v", err)
+			http.Error(w, "error calculando estadísticas", http.StatusInternalServerError)
+			return
+		}
 
 		// Mejor vendedor del período
 		var topSeller models.TopSellerStat
@@ -163,10 +194,15 @@ func (h *AccountingHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 			 GROUP BY u.id, u.username, u.role
 			 ORDER BY total_amount DESC
 			 LIMIT 1`).Scan(&topSeller.Username, &topSeller.Role, &topSeller.TotalAmount, &topSeller.SalesCount)
-		if errSeller == nil {
+		switch {
+		case errSeller == nil:
 			mStats.TopSeller = &topSeller
-		} else {
-			log.Printf("error mejor vendedor query: %v", errSeller)
+		case errors.Is(errSeller, pgx.ErrNoRows):
+			// sin ventas en el período, no hay mejor vendedor
+		default:
+			log.Printf("error consultando el mejor vendedor: %v", errSeller)
+			http.Error(w, "error calculando estadísticas", http.StatusInternalServerError)
+			return
 		}
 
 		// Top 10 Productos más vendidos del período
@@ -181,16 +217,26 @@ func (h *AccountingHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 			 GROUP BY COALESCE(NULLIF(si.product_name, ''), p.name, 'Producto Eliminado')
 			 ORDER BY total_qty DESC
 			 LIMIT 10`)
-		if errProdList == nil {
+		if errProdList != nil {
+			log.Printf("error consultando los productos más vendidos: %v", errProdList)
+			http.Error(w, "error calculando estadísticas", http.StatusInternalServerError)
+			return
+		}
+		prodErr := func() error {
+			defer prodRows.Close()
 			for prodRows.Next() {
 				var tp models.TopProductStat
-				if err := prodRows.Scan(&tp.ProductName, &tp.TotalQty, &tp.TotalAmount); err == nil {
-					mStats.TopProducts = append(mStats.TopProducts, tp)
+				if err := prodRows.Scan(&tp.ProductName, &tp.TotalQty, &tp.TotalAmount); err != nil {
+					return err
 				}
+				mStats.TopProducts = append(mStats.TopProducts, tp)
 			}
-			prodRows.Close()
-		} else {
-			log.Printf("error top productos query: %v", errProdList)
+			return prodRows.Err()
+		}()
+		if prodErr != nil {
+			log.Printf("error leyendo los productos más vendidos: %v", prodErr)
+			http.Error(w, "error calculando estadísticas", http.StatusInternalServerError)
+			return
 		}
 		if len(mStats.TopProducts) > 0 {
 			mStats.TopProduct = &mStats.TopProducts[0]
@@ -204,14 +250,26 @@ func (h *AccountingHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 			 GROUP BY customer_name
 			 ORDER BY total_spent DESC
 			 LIMIT 10`)
-		if errCust == nil {
+		if errCust != nil {
+			log.Printf("error consultando los mejores clientes: %v", errCust)
+			http.Error(w, "error calculando estadísticas", http.StatusInternalServerError)
+			return
+		}
+		custErr := func() error {
+			defer custRows.Close()
 			for custRows.Next() {
 				var cs models.CustomerStat
-				if err := custRows.Scan(&cs.CustomerName, &cs.TotalSpent, &cs.OrdersCount); err == nil {
-					mStats.TopCustomers = append(mStats.TopCustomers, cs)
+				if err := custRows.Scan(&cs.CustomerName, &cs.TotalSpent, &cs.OrdersCount); err != nil {
+					return err
 				}
+				mStats.TopCustomers = append(mStats.TopCustomers, cs)
 			}
-			custRows.Close()
+			return custRows.Err()
+		}()
+		if custErr != nil {
+			log.Printf("error leyendo los mejores clientes: %v", custErr)
+			http.Error(w, "error calculando estadísticas", http.StatusInternalServerError)
+			return
 		}
 
 		// Top 5 Bancos del período
@@ -226,21 +284,32 @@ func (h *AccountingHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 			 GROUP BY bank_name
 			 ORDER BY count DESC, total_amount DESC
 			 LIMIT 5`)
-		if errBank == nil {
+		if errBank != nil {
+			log.Printf("error consultando los bancos más usados: %v", errBank)
+			http.Error(w, "error calculando estadísticas", http.StatusInternalServerError)
+			return
+		}
+		bankErr := func() error {
+			defer bankRows.Close()
 			for bankRows.Next() {
 				var tb models.TopBankStat
-				if err := bankRows.Scan(&tb.BankName, &tb.Count, &tb.TotalAmount); err == nil {
-					mStats.TopBanks = append(mStats.TopBanks, tb)
+				if err := bankRows.Scan(&tb.BankName, &tb.Count, &tb.TotalAmount); err != nil {
+					return err
 				}
+				mStats.TopBanks = append(mStats.TopBanks, tb)
 			}
-			bankRows.Close()
+			return bankRows.Err()
+		}()
+		if bankErr != nil {
+			log.Printf("error leyendo los bancos más usados: %v", bankErr)
+			http.Error(w, "error calculando estadísticas", http.StatusInternalServerError)
+			return
 		}
 
 		summary.MonthlyStats = mStats
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(summary)
+	writeJSON(w, http.StatusOK, summary)
 }
 
 // GET /expenses?period=today|week|month|all
@@ -286,9 +355,13 @@ func (h *AccountingHandler) ListExpenses(w http.ResponseWriter, r *http.Request)
 		}
 		expenses = append(expenses, e)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("error recorriendo gastos: %v", err)
+		http.Error(w, "error leyendo gastos", http.StatusInternalServerError)
+		return
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(expenses)
+	writeJSON(w, http.StatusOK, expenses)
 }
 
 // POST /expenses — si se especifica un ingredient_id y quantity_added > 0, reabastece el inventario
@@ -325,19 +398,16 @@ func (h *AccountingHandler) CreateExpense(w http.ResponseWriter, r *http.Request
 	}
 
 	ctx := r.Context()
-	userVal := ctx.Value(custommw.ContextUserID)
-	var registeredBy uuid.UUID
-	if userVal != nil {
-		if id, ok := userVal.(uuid.UUID); ok {
-			registeredBy = id
-		} else if idStr, ok := userVal.(string); ok {
-			registeredBy, _ = uuid.Parse(idStr)
-		}
+	registeredBy, err := userIDFromContext(ctx)
+	if err != nil {
+		log.Printf("no se pudo identificar a quien registra el gasto: %v", err)
+		http.Error(w, "no autenticado", http.StatusUnauthorized)
+		return
 	}
 
 	tx, err := h.DB.Begin(ctx)
 	if err != nil {
-		log.Printf("error iniciando transacción: %v", err)
+		log.Printf("error iniciando transacción de gasto: %v", err)
 		http.Error(w, "error interno", http.StatusInternalServerError)
 		return
 	}
@@ -393,9 +463,7 @@ func (h *AccountingHandler) CreateExpense(w http.ResponseWriter, r *http.Request
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"id":         expID,
 		"created_at": createdAt,
 	})

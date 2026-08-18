@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 
@@ -46,7 +47,9 @@ func main() {
 	}))
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
+		if _, err := w.Write([]byte("ok")); err != nil {
+			log.Printf("error escribiendo respuesta de /health: %v", err)
+		}
 	})
 
 	authHandler := handlers.NewAuthHandler(pool)
@@ -153,5 +156,7 @@ func main() {
 	})
 
 	log.Println("servidor corriendo en :8080")
-	http.ListenAndServe(":8080", r)
+	if err := http.ListenAndServe(":8080", r); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("el servidor se detuvo: %v", err)
+	}
 }

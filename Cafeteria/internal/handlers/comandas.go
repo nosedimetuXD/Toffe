@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -16,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/NosedimetuXD/cafeteria/internal/events"
-	custommw "github.com/NosedimetuXD/cafeteria/internal/middleware"
 	"github.com/NosedimetuXD/cafeteria/internal/models"
 )
 
@@ -28,9 +26,9 @@ type ComandaHandler struct {
 func NewComandaHandler(db *pgxpool.Pool, hub *events.Hub) *ComandaHandler {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, _ = db.Exec(ctx, `ALTER TABLE comandas ADD COLUMN IF NOT EXISTS ready_at TIMESTAMP WITH TIME ZONE`)
-	_, _ = db.Exec(ctx, `ALTER TABLE comandas ADD COLUMN IF NOT EXISTS prepared_by UUID REFERENCES users(id)`)
-	_, _ = db.Exec(ctx, `ALTER TABLE comandas ADD COLUMN IF NOT EXISTS prepared_by_username VARCHAR(100)`)
+	execSchema(ctx, db, "comandas.ready_at", `ALTER TABLE comandas ADD COLUMN IF NOT EXISTS ready_at TIMESTAMP WITH TIME ZONE`)
+	execSchema(ctx, db, "comandas.prepared_by", `ALTER TABLE comandas ADD COLUMN IF NOT EXISTS prepared_by UUID REFERENCES users(id)`)
+	execSchema(ctx, db, "comandas.prepared_by_username", `ALTER TABLE comandas ADD COLUMN IF NOT EXISTS prepared_by_username VARCHAR(100)`)
 	return &ComandaHandler{DB: db, Hub: hub}
 }
 
@@ -65,6 +63,11 @@ func (h *ComandaHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		comandas = append(comandas, c)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("error recorriendo comandas: %v", err)
+		http.Error(w, "error leyendo comandas", http.StatusInternalServerError)
+		return
+	}
 
 	// Cargar los items de cada comanda
 	for i := range comandas {
@@ -74,20 +77,30 @@ func (h *ComandaHandler) List(w http.ResponseWriter, r *http.Request) {
 			 WHERE comanda_id = $1`, comandas[i].ID)
 		if err != nil {
 			log.Printf("error cargando items de comanda %s: %v", comandas[i].ID, err)
-			continue
+			http.Error(w, "error cargando items de comanda", http.StatusInternalServerError)
+			return
 		}
 
+		var scanErr error
 		for itemRows.Next() {
 			var ci models.ComandaItem
-			if err := itemRows.Scan(&ci.ProductID, &ci.ProductName, &ci.Quantity, &ci.Notes); err == nil {
-				comandas[i].Items = append(comandas[i].Items, ci)
+			if scanErr = itemRows.Scan(&ci.ProductID, &ci.ProductName, &ci.Quantity, &ci.Notes); scanErr != nil {
+				break
 			}
+			comandas[i].Items = append(comandas[i].Items, ci)
+		}
+		if scanErr == nil {
+			scanErr = itemRows.Err()
 		}
 		itemRows.Close()
+		if scanErr != nil {
+			log.Printf("error leyendo items de comanda %s: %v", comandas[i].ID, scanErr)
+			http.Error(w, "error leyendo items de comanda", http.StatusInternalServerError)
+			return
+		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(comandas)
+	writeJSON(w, http.StatusOK, comandas)
 }
 
 // PATCH /comandas/{id}/status
@@ -123,25 +136,26 @@ func (h *ComandaHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userIDVal := r.Context().Value(custommw.ContextUserID)
-
-	var userID *uuid.UUID
-	if idVal, ok := userIDVal.(uuid.UUID); ok {
-		userID = &idVal
-	} else if idStr, ok := userIDVal.(string); ok {
-		if parsed, pErr := uuid.Parse(idStr); pErr == nil {
-			userID = &parsed
-		}
+	userID, err := userIDFromContext(r.Context())
+	if err != nil {
+		log.Printf("no se pudo identificar al usuario autenticado: %v", err)
+		http.Error(w, "no autenticado", http.StatusUnauthorized)
+		return
 	}
 
 	var preparedBy *uuid.UUID
 	var preparedByName string
-	if userID != nil {
-		var validID uuid.UUID
-		errU := h.DB.QueryRow(r.Context(), "SELECT id, username FROM users WHERE id = $1", *userID).Scan(&validID, &preparedByName)
-		if errU == nil {
-			preparedBy = &validID
-		}
+	var validID uuid.UUID
+	switch err := h.DB.QueryRow(r.Context(), "SELECT id, username FROM users WHERE id = $1", userID).Scan(&validID, &preparedByName); {
+	case err == nil:
+		preparedBy = &validID
+	case errors.Is(err, pgx.ErrNoRows):
+		// el usuario de la sesión ya no existe; la comanda se actualiza sin responsable
+		log.Printf("el usuario %s de la sesión ya no existe", userID)
+	default:
+		log.Printf("error consultando el usuario %s: %v", userID, err)
+		http.Error(w, "error interno", http.StatusInternalServerError)
+		return
 	}
 	if preparedByName == "" {
 		preparedByName = strings.TrimSpace(req.PreparedByUsername)
@@ -172,7 +186,7 @@ func (h *ComandaHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("error crítico actualizando comanda %s: %v", id, updateErr)
-		http.Error(w, fmt.Sprintf("Error actualizando comanda: %v", updateErr), http.StatusInternalServerError)
+		http.Error(w, "error actualizando comanda", http.StatusInternalServerError)
 		return
 	}
 
@@ -183,6 +197,5 @@ func (h *ComandaHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		"updated_at":   c.UpdatedAt,
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(c)
+	writeJSON(w, http.StatusOK, c)
 }

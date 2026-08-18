@@ -25,13 +25,13 @@ func NewProductHandler(db *pgxpool.Pool) *ProductHandler {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, _ = db.Exec(ctx, `ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT DEFAULT ''`)
-	_, _ = db.Exec(ctx, `ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'Bebidas'`)
+	execSchema(ctx, db, "products.image_url", `ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT DEFAULT ''`)
+	execSchema(ctx, db, "products.category", `ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'Bebidas'`)
 
-	_, _ = db.Exec(ctx, `ALTER TABLE sale_items ALTER COLUMN product_id DROP NOT NULL`)
-	_, _ = db.Exec(ctx, `ALTER TABLE comanda_items ALTER COLUMN product_id DROP NOT NULL`)
+	execSchema(ctx, db, "sale_items.product_id nullable", `ALTER TABLE sale_items ALTER COLUMN product_id DROP NOT NULL`)
+	execSchema(ctx, db, "comanda_items.product_id nullable", `ALTER TABLE comanda_items ALTER COLUMN product_id DROP NOT NULL`)
 
-	_, _ = db.Exec(ctx, `
+	execSchema(ctx, db, "claves foráneas de product_id", `
 		DO $$ 
 		BEGIN 
 			IF EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name = 'sale_items_product_id_fkey') THEN
@@ -74,8 +74,7 @@ func (h *ProductHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(p)
+	writeJSON(w, http.StatusOK, p)
 }
 
 // PUT /products/{id}
@@ -129,8 +128,7 @@ func (h *ProductHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(p)
+	writeJSON(w, http.StatusOK, p)
 }
 
 // DELETE /products/{id}
@@ -143,7 +141,7 @@ func (h *ProductHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. Eliminar cualquier restricción foránea previa que intente hacer SET NULL
-	_, _ = h.DB.Exec(r.Context(), `
+	execSchema(r.Context(), h.DB, "claves foráneas de product_id", `
 		DO $$ 
 		BEGIN 
 			IF EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name = 'sale_items_product_id_fkey') THEN
@@ -158,21 +156,48 @@ func (h *ProductHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		END $$;
 	`)
 
-	// 2. Desvincular tablas asociadas manteniendo intactas las ventas y comandas históricas
-	_, _ = h.DB.Exec(r.Context(), `UPDATE sale_items SET product_id = '00000000-0000-0000-0000-000000000000'::uuid WHERE product_id = $1`, id)
-	_, _ = h.DB.Exec(r.Context(), `UPDATE comanda_items SET product_id = '00000000-0000-0000-0000-000000000000'::uuid WHERE product_id = $1`, id)
-	_, _ = h.DB.Exec(r.Context(), `DELETE FROM product_ingredients WHERE product_id = $1`, id)
-	_, _ = h.DB.Exec(r.Context(), `DELETE FROM recipes WHERE product_id = $1`, id)
-	_, _ = h.DB.Exec(r.Context(), `DELETE FROM product_recipes WHERE product_id = $1`, id)
+	ctx := r.Context()
+	tx, err := h.DB.Begin(ctx)
+	if err != nil {
+		log.Printf("error iniciando transacción de borrado de producto: %v", err)
+		http.Error(w, "error interno", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(ctx)
 
-	tag, err := h.DB.Exec(r.Context(), `DELETE FROM products WHERE id = $1`, id)
+	// 2. Desvincular tablas asociadas manteniendo intactas las ventas y comandas históricas
+	cleanup := []struct {
+		desc string
+		sql  string
+	}{
+		{"desvinculando items de venta", `UPDATE sale_items SET product_id = '00000000-0000-0000-0000-000000000000'::uuid WHERE product_id = $1`},
+		{"desvinculando items de comanda", `UPDATE comanda_items SET product_id = '00000000-0000-0000-0000-000000000000'::uuid WHERE product_id = $1`},
+		{"borrando insumos del producto", `DELETE FROM product_ingredients WHERE product_id = $1`},
+		{"borrando recetas", `DELETE FROM recipes WHERE product_id = $1`},
+		{"borrando recetas de producto", `DELETE FROM product_recipes WHERE product_id = $1`},
+	}
+	for _, step := range cleanup {
+		if _, err := tx.Exec(ctx, step.sql, id); err != nil {
+			log.Printf("error %s del producto %s: %v", step.desc, id, err)
+			http.Error(w, fmt.Sprintf("error %s", step.desc), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	tag, err := tx.Exec(ctx, `DELETE FROM products WHERE id = $1`, id)
 	if err != nil {
 		log.Printf("error borrando producto %s: %v", id, err)
-		http.Error(w, fmt.Sprintf("Error borrando producto: %v", err), http.StatusInternalServerError)
+		http.Error(w, "error borrando producto", http.StatusInternalServerError)
 		return
 	}
 	if tag.RowsAffected() == 0 {
 		http.Error(w, "producto no encontrado", http.StatusNotFound)
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("error confirmando borrado de producto %s: %v", id, err)
+		http.Error(w, "error interno", http.StatusInternalServerError)
 		return
 	}
 
@@ -181,14 +206,15 @@ func (h *ProductHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 // GET /products
 func (h *ProductHandler) List(w http.ResponseWriter, r *http.Request) {
-	_, _ = h.DB.Exec(r.Context(), `ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT DEFAULT ''`)
-	_, _ = h.DB.Exec(r.Context(), `ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'Bebidas'`)
+	execSchema(r.Context(), h.DB, "products.image_url", `ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT DEFAULT ''`)
+	execSchema(r.Context(), h.DB, "products.category", `ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'Bebidas'`)
 
 	rows, err := h.DB.Query(r.Context(),
 		`SELECT id, name, description, price, COALESCE(category, 'Bebidas'), COALESCE(image_url, ''), active, created_at, updated_at
 		 FROM products
 		 ORDER BY name`)
 	if err != nil {
+		log.Printf("error consultando productos: %v", err)
 		http.Error(w, "error consultando productos", http.StatusInternalServerError)
 		return
 	}
@@ -198,14 +224,19 @@ func (h *ProductHandler) List(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var p models.Product
 		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.Price, &p.Category, &p.ImageURL, &p.Active, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			log.Printf("error leyendo productos: %v", err)
 			http.Error(w, "error leyendo productos", http.StatusInternalServerError)
 			return
 		}
 		products = append(products, p)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("error recorriendo productos: %v", err)
+		http.Error(w, "error leyendo productos", http.StatusInternalServerError)
+		return
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(products)
+	writeJSON(w, http.StatusOK, products)
 }
 
 // POST /products
@@ -245,7 +276,5 @@ func (h *ProductHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(p)
+	writeJSON(w, http.StatusCreated, p)
 }

@@ -7,14 +7,20 @@ function getToken() {
 async function request(path, options = {}) {
     const token = getToken()
 
-    const response = await fetch(`${API_URL}${path}`, {
-        ...options,
-        headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            ...options.headers
-        }
-    })
+    let response
+    try {
+        response = await fetch(`${API_URL}${path}`, {
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                ...options.headers
+            }
+        })
+    } catch (err) {
+        console.error(`fallo de red en ${path}:`, err)
+        throw new Error('No se pudo conectar con el servidor. Revisa tu conexión.')
+    }
 
     if (!response.ok) {
         if (response.status === 401) {
@@ -29,7 +35,34 @@ async function request(path, options = {}) {
     }
 
     if (response.status === 204) return null
-    return response.json()
+    try {
+        return await response.json()
+    } catch (err) {
+        console.error(`respuesta no válida en ${path}:`, err)
+        throw new Error('El servidor devolvió una respuesta inválida')
+    }
+}
+
+// Carga varios recursos a la vez sin ocultar los que fallan: devuelve los datos
+// que sí llegaron y los nombres de los que no, para poder avisar al usuario.
+export async function loadAllSettled(requests) {
+    const entries = Object.entries(requests)
+    const results = await Promise.allSettled(entries.map(([, promise]) => promise))
+
+    const data = {}
+    const failed = []
+    results.forEach((result, i) => {
+        const [key] = entries[i]
+        if (result.status === 'fulfilled') {
+            data[key] = result.value
+        } else {
+            data[key] = null
+            failed.push(key)
+            console.error(`no se pudo cargar ${key}:`, result.reason)
+        }
+    })
+
+    return { data, failed }
 }
 
 export const api = {

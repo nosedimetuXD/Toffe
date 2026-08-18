@@ -51,9 +51,13 @@ func (h *RecipeHandler) Get(w http.ResponseWriter, r *http.Request) {
 		}
 		recipe = append(recipe, rl)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("error recorriendo receta: %v", err)
+		http.Error(w, "error leyendo receta", http.StatusInternalServerError)
+		return
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(recipe)
+	writeJSON(w, http.StatusOK, recipe)
 }
 
 // PUT /products/{id}/recipe — reemplaza toda la receta del producto

@@ -26,15 +26,15 @@ func NewIngredientHandler(db *pgxpool.Pool, hub *events.Hub) *IngredientHandler 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, _ = db.Exec(ctx, `ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS unit_cost NUMERIC DEFAULT 0`)
-	_, _ = db.Exec(ctx, `ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS min_quantity NUMERIC DEFAULT 5`)
+	execSchema(ctx, db, "ingredients.unit_cost", `ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS unit_cost NUMERIC DEFAULT 0`)
+	execSchema(ctx, db, "ingredients.min_quantity", `ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS min_quantity NUMERIC DEFAULT 5`)
 
 	return &IngredientHandler{DB: db, Hub: hub}
 }
 
 // GET /ingredients
 func (h *IngredientHandler) List(w http.ResponseWriter, r *http.Request) {
-	_, _ = h.DB.Exec(r.Context(), `ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS unit_cost NUMERIC DEFAULT 0`)
+	execSchema(r.Context(), h.DB, "ingredients.unit_cost", `ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS unit_cost NUMERIC DEFAULT 0`)
 
 	rows, err := h.DB.Query(r.Context(),
 		`SELECT id, name, unit, quantity, COALESCE(min_quantity, 5), COALESCE(unit_cost, 0), created_at, updated_at
@@ -56,9 +56,13 @@ func (h *IngredientHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		ingredients = append(ingredients, i)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("error recorriendo insumos: %v", err)
+		http.Error(w, "error leyendo insumos", http.StatusInternalServerError)
+		return
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(ingredients)
+	writeJSON(w, http.StatusOK, ingredients)
 }
 
 // GET /ingredients/{id}
@@ -85,8 +89,7 @@ func (h *IngredientHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(i)
+	writeJSON(w, http.StatusOK, i)
 }
 
 // POST /ingredients
@@ -122,9 +125,7 @@ func (h *IngredientHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(i)
+	writeJSON(w, http.StatusCreated, i)
 }
 
 // PUT /ingredients/{id}
@@ -174,8 +175,7 @@ func (h *IngredientHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	h.Hub.Publish("inventory_updated", i)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(i)
+	writeJSON(w, http.StatusOK, i)
 }
 
 // DELETE /ingredients/{id}
@@ -186,10 +186,27 @@ func (h *IngredientHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _ = h.DB.Exec(r.Context(), `DELETE FROM recipe_items WHERE ingredient_id = $1`, id)
-	_, _ = h.DB.Exec(r.Context(), `DELETE FROM waste_reports WHERE ingredient_id = $1`, id)
+	ctx := r.Context()
+	tx, err := h.DB.Begin(ctx)
+	if err != nil {
+		log.Printf("error iniciando transacción de borrado de insumo: %v", err)
+		http.Error(w, "error interno", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(ctx)
 
-	tag, err := h.DB.Exec(r.Context(), `DELETE FROM ingredients WHERE id = $1`, id)
+	if _, err := tx.Exec(ctx, `DELETE FROM recipe_items WHERE ingredient_id = $1`, id); err != nil {
+		log.Printf("error borrando items de receta del insumo %s: %v", id, err)
+		http.Error(w, "error borrando insumo", http.StatusInternalServerError)
+		return
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM waste_reports WHERE ingredient_id = $1`, id); err != nil {
+		log.Printf("error borrando mermas del insumo %s: %v", id, err)
+		http.Error(w, "error borrando insumo", http.StatusInternalServerError)
+		return
+	}
+
+	tag, err := tx.Exec(ctx, `DELETE FROM ingredients WHERE id = $1`, id)
 	if err != nil {
 		log.Printf("error borrando insumo: %v", err)
 		http.Error(w, "error borrando insumo", http.StatusInternalServerError)
@@ -197,6 +214,12 @@ func (h *IngredientHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	if tag.RowsAffected() == 0 {
 		http.Error(w, "insumo no encontrado", http.StatusNotFound)
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("error confirmando borrado de insumo %s: %v", id, err)
+		http.Error(w, "error interno", http.StatusInternalServerError)
 		return
 	}
 

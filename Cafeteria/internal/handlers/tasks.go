@@ -52,9 +52,13 @@ func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		tasks = append(tasks, t)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("error recorriendo tareas: %v", err)
+		http.Error(w, "error leyendo tareas", http.StatusInternalServerError)
+		return
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(tasks)
+	writeJSON(w, http.StatusOK, tasks)
 }
 
 // POST /tasks — solo owner y admin
@@ -76,10 +80,15 @@ func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	createdBy := r.Context().Value(custommw.ContextUserID)
+	createdBy, err := userIDFromContext(r.Context())
+	if err != nil {
+		log.Printf("no se pudo identificar al creador de la tarea: %v", err)
+		http.Error(w, "no autenticado", http.StatusUnauthorized)
+		return
+	}
 
 	var t models.Task
-	err := h.DB.QueryRow(r.Context(),
+	err = h.DB.QueryRow(r.Context(),
 		`INSERT INTO tasks (title, description, assigned_to, created_by, due_date)
 		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, title, description, assigned_to, created_by, status, due_date, created_at, updated_at`,
@@ -93,9 +102,7 @@ func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	h.Hub.Publish("task created", t)
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(t)
+	writeJSON(w, http.StatusCreated, t)
 }
 
 // PUT /tasks/{id} — editar título/descripción/asignación: solo owner y admin
@@ -144,8 +151,7 @@ func (h *TaskHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	h.Hub.Publish("task status updated", t)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(t)
+	writeJSON(w, http.StatusOK, t)
 }
 
 // PATCH /tasks/{id}/status — cambio de estado con validación de asignado
@@ -186,17 +192,19 @@ func (h *TaskHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tarea no encontrada", http.StatusNotFound)
 		return
 	}
+	if err != nil {
+		log.Printf("error consultando la tarea %s: %v", id, err)
+		http.Error(w, "error consultando tarea", http.StatusInternalServerError)
+		return
+	}
 
-	userVal := ctx.Value(custommw.ContextUserID)
 	roleVal := ctx.Value(custommw.ContextRole)
 
-	var currentUserID uuid.UUID
-	if userVal != nil {
-		if val, ok := userVal.(uuid.UUID); ok {
-			currentUserID = val
-		} else if valStr, ok := userVal.(string); ok {
-			currentUserID, _ = uuid.Parse(valStr)
-		}
+	currentUserID, err := userIDFromContext(ctx)
+	if err != nil {
+		log.Printf("no se pudo identificar al usuario autenticado: %v", err)
+		http.Error(w, "no autenticado", http.StatusUnauthorized)
+		return
 	}
 
 	userRole := ""
@@ -226,8 +234,7 @@ func (h *TaskHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(t)
+	writeJSON(w, http.StatusOK, t)
 }
 
 // DELETE /tasks/{id} — solo owner y admin

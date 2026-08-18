@@ -27,6 +27,7 @@ export default function Tasks() {
       setTasks(tasksData || [])
       setUsers(usersData || [])
     } catch (err) {
+      console.error('Error cargando tareas:', err)
       setPageError('No se pudieron cargar las tareas')
     } finally {
       setLoading(false)
@@ -39,12 +40,20 @@ export default function Tasks() {
     // Conexión SSE en tiempo real
     const eventSource = new EventSource(`${API_URL}/events`)
     eventSource.onmessage = (event) => {
+      let data
       try {
-        const data = JSON.parse(event.data)
-        if (data.type === 'task_created' || data.type === 'task_status_updated') {
-          loadData()
-        }
-      } catch (e) {}
+        data = JSON.parse(event.data)
+      } catch (e) {
+        console.error('evento de tareas con payload inválido:', e)
+        return
+      }
+      if (data.type === 'task_created' || data.type === 'task_status_updated') {
+        loadData()
+      }
+    }
+
+    eventSource.onerror = () => {
+      console.error('conexión de eventos de tareas interrumpida, reintentando...')
     }
 
     return () => {

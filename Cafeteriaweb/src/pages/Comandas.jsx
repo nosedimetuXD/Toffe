@@ -22,6 +22,7 @@ export default function Comandas() {
       const data = await api.get('/comandas')
       setComandas(data || [])
     } catch (err) {
+      console.error('Error cargando comandas:', err)
       setError('No se pudieron cargar las comandas')
     } finally {
       setLoading(false)
@@ -44,7 +45,11 @@ export default function Comandas() {
       gain.connect(ctx.destination)
       osc.start()
       osc.stop(ctx.currentTime + 0.6)
-    } catch (err) {}
+    } catch (err) {
+      // El sonido es un extra: si el navegador lo bloquea seguimos igual,
+      // pero dejamos rastro para poder diagnosticarlo
+      console.warn('no se pudo reproducir el aviso sonoro:', err)
+    }
   }
 
   useEffect(() => {
@@ -54,13 +59,21 @@ export default function Comandas() {
     const eventSource = new EventSource(`${API_URL}/events`)
 
     eventSource.onmessage = (event) => {
+      let data
       try {
-        const data = JSON.parse(event.data)
-        if (data.type === 'comanda_created' || data.type === 'comanda_status_updated' || data.type === 'comanda_updated') {
-          playBellSound()
-          loadComandas()
-        }
-      } catch (e) {}
+        data = JSON.parse(event.data)
+      } catch (e) {
+        console.error('evento de comandas con payload inválido:', e)
+        return
+      }
+      if (data.type === 'comanda_created' || data.type === 'comanda_status_updated' || data.type === 'comanda_updated') {
+        playBellSound()
+        loadComandas()
+      }
+    }
+
+    eventSource.onerror = () => {
+      console.error('conexión de eventos de comandas interrumpida, reintentando...')
     }
 
     return () => {
@@ -70,8 +83,7 @@ export default function Comandas() {
 
   async function handleStatusChange(id, newStatus) {
     try {
-      const userObj = JSON.parse(localStorage.getItem('user') || '{}')
-      const preparerName = userObj.username || userObj.name || ''
+      const preparerName = user?.username || ''
 
       await api.patch(`/comandas/${id}/status`, {
         status: newStatus,

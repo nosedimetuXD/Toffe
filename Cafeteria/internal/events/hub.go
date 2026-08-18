@@ -2,6 +2,8 @@ package events
 
 import (
 	"encoding/json"
+	"fmt"
+	"log"
 	"sync"
 )
 
@@ -47,11 +49,17 @@ func (h *Hub) Publish(eventType string, data interface{}) {
 		default:
 			// el cliente está lento y su buffer está lleno; se salta este evento
 			// para no bloquear a los demás clientes
+			log.Printf("evento %s descartado: el buffer del cliente está lleno", eventType)
 		}
 	}
 }
 
-func (e Event) ToSSE() []byte {
-	payload, _ := json.Marshal(e.Data)
-	return []byte("event: " + e.Type + "\ndata: " + string(payload) + "\n\n")
+// ToSSE serializa el evento al formato SSE. Devuelve error si el payload no es
+// serializable, para que el llamador no envíe un evento corrupto en silencio.
+func (e Event) ToSSE() ([]byte, error) {
+	payload, err := json.Marshal(e.Data)
+	if err != nil {
+		return nil, fmt.Errorf("no se pudo serializar el evento %s: %w", e.Type, err)
+	}
+	return []byte("event: " + e.Type + "\ndata: " + string(payload) + "\n\n"), nil
 }

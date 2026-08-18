@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from 'react'
-import { api } from '../api/client'
+import { api, loadAllSettled } from '../api/client'
 import { useAuth } from '../context/AuthContext'
 import Modal from '../components/Modal'
 import { processImageUrl, compressAndReadFile } from '../utils/imageUtils'
@@ -30,19 +30,21 @@ export default function Users() {
 
   async function loadData() {
     try {
-      const [uData, sData, eData, tData, wData] = await Promise.all([
-        api.get('/users').catch(() => []),
-        api.get('/sales?period=all').catch(() => []),
-        api.get('/expenses?period=all').catch(() => []),
-        api.get('/tasks').catch(() => []),
-        api.get('/waste').catch(() => [])
-      ])
-      setUsers(uData || [])
-      setSales(sData || [])
-      setExpenses(eData || [])
-      setTasks(tData || [])
-      setWasteReports(wData || [])
+      const { data, failed } = await loadAllSettled({
+        usuarios: api.get('/users'),
+        ventas: api.get('/sales?period=all'),
+        gastos: api.get('/expenses?period=all'),
+        tareas: api.get('/tasks'),
+        desperdicios: api.get('/waste')
+      })
+      setUsers(data.usuarios || [])
+      setSales(data.ventas || [])
+      setExpenses(data.gastos || [])
+      setTasks(data.tareas || [])
+      setWasteReports(data.desperdicios || [])
+      setPageError(failed.length > 0 ? `No se pudieron cargar: ${failed.join(', ')}` : '')
     } catch (err) {
+      console.error('Error cargando usuarios:', err)
       setPageError('No se pudieron cargar los usuarios')
     } finally {
       setLoading(false)
