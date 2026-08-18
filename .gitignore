@@ -27,6 +27,7 @@ vendor/
 node_modules/
 dist/
 .vite/
+coverage/
 
 # IDEs
 .vscode/
